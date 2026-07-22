@@ -1,5 +1,7 @@
 # Compute Management Dashboard
 
+[Live Demo](https://gpu-compute-management-engine.vercel.app/)
+
 A comprehensive dashboard for managing GPU compute supply and demand. A bottom-up demand build, existing compute supply book, and vendor specs are fed into a multi-step supply procurement optimizer (Supply Filling Engine) to maximize expected profits.
 
 ## Tabs
