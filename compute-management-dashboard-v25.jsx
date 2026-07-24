@@ -4639,7 +4639,7 @@ function InstructionsApp() {
       ],
     },
     {
-      name: "Temporal",
+      name: "Future Supply",
       bullets: [
         "Answers the old-gen vs. new-gen upgrade timing question: given a planning horizon and rate cards for current-gen hardware, when (if ever) is it optimal to switch to the next generation?",
         "Prices every valid \"bridge n years on current gen, then switch\" strategy under a two-regime price path (scarcity inflation → normalization decay) and a maturity-ramped goodput speedup — the enumerated PV(n) reveals the optimal bridge length.",
@@ -5533,7 +5533,7 @@ function TemporalApp() {
 
         <div style={{ marginBottom: 4 }}>
           <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>
-            Temporal <span style={{ color: AMB }}>&mdash; old-gen vs. new-gen upgrade timing</span>
+            Future Supply <span style={{ color: AMB }}>&mdash; old-gen vs. new-gen upgrade timing</span>
           </div>
           <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.72)", marginTop: 6, lineHeight: 1.6 }}>
             <div style={{ marginBottom: 6 }}>When do we stop signing new positions on current-generation silicon and start signing next-gen instead?</div>
@@ -5818,7 +5818,7 @@ export default function App() {
     { key: "demand", label: "COMPUTE DEMAND", sub: "demand book & run sizing" },
     { key: "supply", label: "COMPUTE SUPPLY", sub: "supply book & deal intake" },
     { key: "vendor", label: "VENDOR SPEC", sub: "compare vendor spec sheets" },
-    { key: "temporal", label: "TEMPORAL", sub: "old-gen vs. new-gen upgrade timing" },
+    { key: "temporal", label: "FUTURE SUPPLY", sub: "old-gen vs. new-gen upgrade timing" },
   ];
   return (
     <div style={{ minHeight: "100vh", background: "#0b1118" }}>
