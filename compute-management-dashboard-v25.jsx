@@ -1244,6 +1244,21 @@ function App() {
   // H100e normalization basis for book aggregates: FLOPs (training convention)
   // or memory bandwidth (inference-native).
   const [normMode, setNormMode] = useState("flops");
+  // Supply-book sort state. key=null preserves insertion order; string keys are
+  // sorted ascending, numeric keys descending, on first click.
+  const [sortBy, setSortBy] = useState({ key: null, dir: "desc" });
+  const STRING_SORT_KEYS = ["provider", "gpu", "structure", "pay", "region", "ic", "status"];
+  const toggleSort = (key) => setSortBy(s => s.key === key
+    ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+    : { key, dir: STRING_SORT_KEYS.includes(key) ? "asc" : "desc" });
+  // $/H100e-hr: raw contracted rate divided by the row's H100-relative perf
+  // ratio under the active normalization mode (FLOPs or memory bandwidth).
+  // Makes rates directly comparable across chip generations.
+  const normRateOf = (r) => {
+    const g = SUPPLY_GPUS[r.gpu]; if (!g) return r.rate;
+    const ratio = normMode === "bw" ? g.bw / SUPPLY_GPUS.H100.bw : g.tflops / SUPPLY_GPUS.H100.tflops;
+    return ratio > 0 ? r.rate / ratio : r.rate;
+  };
   // ── Book aggregates ──
   const agg = useMemo(() => {
     const act = book.filter(r => r.status === "active");
@@ -1290,6 +1305,36 @@ function App() {
     for (const k of Object.keys(byGpu)) byGpu[k].rate = byGpu[k].cost / byGpu[k].gpus;
     return { totalGpus, totalH100e, rsvGpus, odGpus, spotGpus, blended, blendedGpu, committedMonthly, committedRemaining, prepaidOut, wTerm, buckets, byGpu, freeGpus, freeH100e, undelivered };
   }, [book, normMode]);
+
+  // Sorted view of the book — click a header to sort by that column. Sort is
+  // display-only; storage order in SUPPLY_STORE is preserved.
+  const sortedBook = useMemo(() => {
+    if (!sortBy.key) return book;
+    const dir = sortBy.dir === "asc" ? 1 : -1;
+    const getVal = (r) => {
+      switch (sortBy.key) {
+        case "provider":   return r.provider || "";
+        case "gpu":        return r.gpu || "";
+        case "gpus":       return r.gpus || 0;
+        case "structure":  return r.structure || "";
+        case "rate":       return r.rate || 0;
+        case "normRate":   return normRateOf(r);
+        case "termMo":     return r.termMo || 0;
+        case "remMo":      return r.remMo || 0;
+        case "upfrontPct": return r.upfrontPct || 0;
+        case "pay":        return r.pay || "";
+        case "region":     return r.region || "";
+        case "ic":         return r.ic || "";
+        case "status":     return r.status || "";
+        default:           return 0;
+      }
+    };
+    return [...book].sort((a, b) => {
+      const va = getVal(a), vb = getVal(b);
+      if (typeof va === "string") return va.localeCompare(vb) * dir;
+      return (va - vb) * dir;
+    });
+  }, [book, sortBy, normMode]);
 
   const removeRow = useCallback(id => setBook(b => b.filter(r => r.id !== id)), []);
   const toggleStatus = useCallback(id => setBook(b => b.map(r => r.id === id ? { ...r, status: r.status === "active" ? "pending" : "active" } : r)), []);
@@ -1657,18 +1702,46 @@ function App() {
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: F }}>
                 <thead><tr>
-                  <th style={th("left")}>PROVIDER</th><th style={th("left")}>GPU</th><th style={th()}>QTY</th><th style={th("left")}>STRUCT</th>
-                  <th style={th()}>$/GPU-HR</th><th style={th()}>TERM</th><th style={th()}>LEFT</th><th style={th()}>UPFRONT</th>
-                  <th style={th("left")}>PAY</th><th style={th("left")}>REGION</th><th style={th("left")}>FABRIC</th><th style={th("left")}>STATUS</th><th style={th()}></th>
+                  {(() => {
+                    const cols = [
+                      { k: "provider",   label: "PROVIDER",    align: "left"  },
+                      { k: "gpu",        label: "GPU",         align: "left"  },
+                      { k: "gpus",       label: "QTY",         align: "right" },
+                      { k: "structure",  label: "STRUCT",      align: "left"  },
+                      { k: "rate",       label: "$/GPU-HR",    align: "right" },
+                      { k: "normRate",   label: "$/H100e-HR",  align: "right" },
+                      { k: "termMo",     label: "TERM",        align: "right" },
+                      { k: "remMo",      label: "LEFT",        align: "right" },
+                      { k: "upfrontPct", label: "UPFRONT",     align: "right" },
+                      { k: "pay",        label: "PAY",         align: "left"  },
+                      { k: "region",     label: "REGION",      align: "left"  },
+                      { k: "ic",         label: "FABRIC",      align: "left"  },
+                      { k: "status",     label: "STATUS",      align: "left"  },
+                    ];
+                    return cols.map(c => {
+                      const active = sortBy.key === c.k;
+                      const arrow = active ? (sortBy.dir === "asc" ? " ▲" : " ▼") : "";
+                      return (
+                        <th key={c.k}
+                            onClick={() => toggleSort(c.k)}
+                            title={c.k === "normRate" ? `raw $/GPU-hr ÷ (${normMode === "bw" ? "BW" : "FLOPs"} vs H100)` : "click to sort"}
+                            style={{ ...th(c.align), cursor: "pointer", userSelect: "none", color: active ? AMB : "rgba(255,255,255,0.25)" }}>
+                          {c.label}{arrow}
+                        </th>
+                      );
+                    });
+                  })()}
+                  <th style={th()}></th>
                 </tr></thead>
                 <tbody>
-                  {book.map(r => (
+                  {sortedBook.map(r => (
                     <tr key={r.id} style={{ opacity: r.status === "pending" ? 0.55 : 1 }}>
                       <td style={td({ color: "#e2e8f0", whiteSpace: "nowrap" })}>{r.provider}<CmaxBadge provider={r.provider} /></td>
                       <td style={td({ color: "rgba(255,255,255,0.6)", whiteSpace: "nowrap" })}>{SUPPLY_GPUS[r.gpu] ? SUPPLY_GPUS[r.gpu].label.split(" ")[0] : r.gpu}<PoolChip gpu={r.gpu} /></td>
                       <td style={td({ textAlign: "right", color: "#e2e8f0", fontWeight: 600 })}>{r.gpus.toLocaleString()}</td>
                       <td style={td({ color: structColor(r.structure), fontSize: 9, fontWeight: 700, letterSpacing: "0.06em" })}>{structTag(r.structure)}</td>
                       <td style={td({ textAlign: "right", color: AMB })}>{fmtUSD(r.rate, 2)}</td>
+                      <td style={td({ textAlign: "right", color: "rgba(251,191,36,0.65)" })} title={`normalized by ${normMode === "bw" ? "memory bandwidth" : "FLOPs"} vs H100`}>{fmtUSD(normRateOf(r), 2)}</td>
                       <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.5)" })}>{r.termMo > 0 ? r.termMo + "mo" : "—"}</td>
                       <td style={td({ textAlign: "right", color: r.remMo > 0 && r.remMo <= 3 ? "#f87171" : "rgba(255,255,255,0.5)" })}>{r.termMo > 0 ? r.remMo + "mo" : "—"}</td>
                       <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.5)" })}>{r.upfrontPct > 0 ? r.upfrontPct + "%" : "—"}</td>
@@ -1687,7 +1760,7 @@ function App() {
               </table>
             </div>
             <div style={{ fontSize: 9, color: "rgba(255,255,255,0.2)", marginTop: 8 }}>
-              RSV = contracted/reserved (paid whether sold or not) · OD = pay-per-use upstream · SPOT = interruptible. Rows marked PENDING are logged deals not yet signed and are excluded from aggregates. ✕ removes a row.
+              RSV = contracted/reserved (paid whether sold or not) · OD = pay-per-use upstream · SPOT = interruptible. $/H100e-HR = raw $/GPU-hr normalized by the row's H100-relative {normMode === "bw" ? "memory-bandwidth" : "FLOPs"} ratio (toggle basis in the header above) — makes rates comparable across chip generations. Click any column header to sort (click again to flip direction). Rows marked PENDING are logged deals not yet signed and are excluded from aggregates. ✕ removes a row.
             </div>
           </Section>
 
@@ -5934,10 +6007,514 @@ function TemporalApp() {
   );
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Q&A TAB — OpenRouter-backed chat that can read and edit any editable
+// dashboard parameter through a small tool-call surface. The LLM never
+// touches the engines directly; every mutation flows through the module-level
+// stores below. A snapshot captured at module load drives "Reset defaults".
+// ═════════════════════════════════════════════════════════════════════════════
+const QA_CLONE = (v) => JSON.parse(JSON.stringify(v));
+
+const QA_DEFAULTS = {
+  supply: QA_CLONE(SUPPLY_STORE.get()),
+  demand: QA_CLONE(DEMAND_STORE.get()),
+  baseline: QA_CLONE(BASELINE_STORE.get()),
+  modelMix: QA_CLONE(MODEL_MIX_STORE.get()),
+  cohorts: QA_CLONE(COHORT_STORE.get()),
+  scenarioCohorts: QA_CLONE(SCENARIO_COHORTS),
+  demandScenario: DEMAND_SCENARIO_STORE.get(),
+  scenarioProb: { ...SCENARIO_PROB_STORE.get() },
+  pricing: { ...PRICING_STORE.get() },
+  policy: { ...POLICY_STORE.get() },
+  tokPerHr: TOKPERHR_STORE.get(),
+};
+
+function qaResetDefaults() {
+  SUPPLY_STORE.set(QA_CLONE(QA_DEFAULTS.supply));
+  DEMAND_STORE.set(QA_CLONE(QA_DEFAULTS.demand));
+  BASELINE_STORE.set(QA_CLONE(QA_DEFAULTS.baseline));
+  MODEL_MIX_STORE.set(QA_CLONE(QA_DEFAULTS.modelMix));
+  Object.keys(SCENARIO_COHORTS).forEach(k => { SCENARIO_COHORTS[k] = QA_CLONE(QA_DEFAULTS.scenarioCohorts[k]); });
+  DEMAND_SCENARIO_STORE.set(QA_DEFAULTS.demandScenario);
+  // Reload the active scenario's cohort data so COHORT_STORE stays in sync.
+  COHORT_STORE.set(QA_CLONE(QA_DEFAULTS.scenarioCohorts[QA_DEFAULTS.demandScenario]));
+  SCENARIO_PROB_STORE.set({ ...QA_DEFAULTS.scenarioProb });
+  PRICING_STORE.set({ ...QA_DEFAULTS.pricing });
+  POLICY_STORE.set({ ...QA_DEFAULTS.policy });
+  TOKPERHR_STORE.set(QA_DEFAULTS.tokPerHr);
+}
+
+function qaGetState() {
+  return {
+    pricing: PRICING_STORE.get(),
+    policy: POLICY_STORE.get(),
+    tokPerHr: TOKPERHR_STORE.get(),
+    demandScenario: DEMAND_SCENARIO_STORE.get(),
+    scenarioProb: SCENARIO_PROB_STORE.get(),
+    modelMix: MODEL_MIX_STORE.get(),
+    baseline: BASELINE_STORE.get(),
+    cohorts: COHORT_STORE.get(),
+    supply: SUPPLY_STORE.get(),
+    demand: DEMAND_STORE.get(),
+  };
+}
+
+const QA_STORE_MAP = {
+  pricing: PRICING_STORE, policy: POLICY_STORE, tokPerHr: TOKPERHR_STORE,
+  demandScenario: DEMAND_SCENARIO_STORE, scenarioProb: SCENARIO_PROB_STORE,
+  modelMix: MODEL_MIX_STORE, baseline: BASELINE_STORE, cohorts: COHORT_STORE,
+  supply: SUPPLY_STORE, demand: DEMAND_STORE,
+};
+
+// Parse "pricing.trainPrice" / "supply[id=15].rate" / "baseline.train[3].modelB"
+// into a segment list. `[k=v]` selects an array item by field equality; `[N]`
+// selects by numeric index.
+function qaParsePath(path) {
+  const segs = [];
+  let i = 0;
+  while (i < path.length) {
+    let seg = "";
+    while (i < path.length && path[i] !== "." && path[i] !== "[") { seg += path[i]; i++; }
+    if (seg) segs.push({ kind: "field", key: seg });
+    if (path[i] === ".") { i++; continue; }
+    if (path[i] === "[") {
+      i++;
+      let inside = "";
+      while (i < path.length && path[i] !== "]") { inside += path[i]; i++; }
+      if (path[i] === "]") i++;
+      if (path[i] === ".") i++;
+      const eq = inside.indexOf("=");
+      if (eq >= 0) segs.push({ kind: "match", key: inside.slice(0, eq), value: inside.slice(eq + 1) });
+      else segs.push({ kind: "index", idx: Number(inside) });
+    }
+  }
+  return segs;
+}
+
+function qaWalk(root, segs) {
+  let cur = root, parent = null, key = null;
+  for (const s of segs) {
+    parent = cur;
+    if (s.kind === "field") { key = s.key; cur = cur == null ? undefined : cur[key]; }
+    else if (s.kind === "index") { key = s.idx; cur = cur == null ? undefined : cur[key]; }
+    else {
+      if (!Array.isArray(cur)) throw new Error("selector on non-array: [" + s.key + "=" + s.value + "]");
+      const idx = cur.findIndex(x => String(x[s.key]) === String(s.value));
+      if (idx < 0) throw new Error("no match for [" + s.key + "=" + s.value + "]");
+      key = idx; cur = cur[idx];
+    }
+  }
+  return { parent, key, value: cur };
+}
+
+// Scenario switches must go through the same stash-and-swap the tabs use, or
+// the tabs will show cohorts that no longer match the selected scenario.
+function qaSetScenario(next) {
+  const prev = DEMAND_SCENARIO_STORE.get();
+  if (prev === next) return;
+  if (!SCENARIO_COHORTS[next]) throw new Error("unknown scenario: " + next);
+  SCENARIO_COHORTS[prev] = COHORT_STORE.get();
+  DEMAND_SCENARIO_STORE.set(next);
+  COHORT_STORE.set(SCENARIO_COHORTS[next]);
+}
+
+function qaApplyPatches(patches) {
+  const out = [];
+  for (const p of patches || []) {
+    try {
+      const segs = qaParsePath(p.path || "");
+      if (!segs.length) throw new Error("empty path");
+      const rootKey = segs[0].key;
+      const store = QA_STORE_MAP[rootKey];
+      if (!store) throw new Error("unknown root: " + rootKey);
+      const before = store.get();
+      if (segs.length === 1) {
+        if (rootKey === "demandScenario") qaSetScenario(p.value);
+        else store.set(p.value);
+        out.push({ path: p.path, ok: true, from: before, to: p.value });
+        continue;
+      }
+      const isObj = before !== null && typeof before === "object";
+      const clone = isObj ? QA_CLONE(before) : before;
+      const { parent, key, value: from } = qaWalk(clone, segs.slice(1));
+      if (parent == null) throw new Error("path did not resolve");
+      parent[key] = p.value;
+      store.set(clone);
+      out.push({ path: p.path, ok: true, from, to: p.value });
+    } catch (e) {
+      out.push({ path: p.path, ok: false, error: String(e.message || e) });
+    }
+  }
+  return out;
+}
+
+function qaAddItem(collection, item) {
+  const store = QA_STORE_MAP[collection];
+  if (!store) throw new Error("unknown collection: " + collection);
+  const cur = store.get();
+  if (!Array.isArray(cur)) throw new Error(collection + " is not an array");
+  const nextId = cur.reduce((mx, x) => Math.max(mx, Number(x.id) || 0), 0) + 1;
+  const withId = { id: nextId, ...item };
+  store.set([...cur, withId]);
+  return withId;
+}
+
+function qaRemoveItem(collection, id) {
+  const store = QA_STORE_MAP[collection];
+  if (!store) throw new Error("unknown collection: " + collection);
+  const cur = store.get();
+  if (!Array.isArray(cur)) throw new Error(collection + " is not an array");
+  const filtered = cur.filter(x => String(x.id) !== String(id));
+  if (filtered.length === cur.length) throw new Error("no item with id=" + id);
+  store.set(filtered);
+  return { removed: id, remaining: filtered.length };
+}
+
+const QA_TOOLS = [
+  { type: "function", function: {
+    name: "get_state",
+    description: "Return the full current state of every editable dashboard parameter as JSON. Call this before proposing edits so you're working from current values.",
+    parameters: { type: "object", properties: {}, required: [] },
+  }},
+  { type: "function", function: {
+    name: "update_state",
+    description: "Apply one or more parameter updates. Each patch is { path, value }. Paths use dotted notation with [key=value] selectors for arrays. Examples: 'pricing.trainPrice', 'supply[id=15].rate', 'cohorts[id=1].regions[region=US-East].custBase', 'modelMix[id=5].pct', 'baseline.train[3].modelB'. Only edit existing fields — do not invent new ones.",
+    parameters: {
+      type: "object",
+      properties: {
+        patches: {
+          type: "array",
+          items: { type: "object", properties: { path: { type: "string" }, value: {} }, required: ["path", "value"] },
+        },
+      },
+      required: ["patches"],
+    },
+  }},
+  { type: "function", function: {
+    name: "add_item",
+    description: "Append a new item to one of the array-shaped collections: supply, demand, or modelMix. An id is auto-assigned. Provide the full item body — see get_state for the shape of existing items.",
+    parameters: {
+      type: "object",
+      properties: {
+        collection: { type: "string", enum: ["supply", "demand", "modelMix"] },
+        item: { type: "object" },
+      },
+      required: ["collection", "item"],
+    },
+  }},
+  { type: "function", function: {
+    name: "remove_item",
+    description: "Remove an item by id from supply, demand, or modelMix.",
+    parameters: {
+      type: "object",
+      properties: {
+        collection: { type: "string", enum: ["supply", "demand", "modelMix"] },
+        id: { type: ["number", "string"] },
+      },
+      required: ["collection", "id"],
+    },
+  }},
+];
+
+const QA_SYSTEM = `You are the Q&A assistant embedded in a compute-management dashboard. The dashboard tracks GPU supply deals, customer demand forecasts, pricing, workload baselines, and a temporal upgrade-timing model. Your job is to answer the user's question and, when appropriate, use the provided tools to READ current parameter state and PROPOSE / APPLY parameter edits.
+
+Rules:
+- You may only edit parameters through the tools. You cannot change how the dashboard computes anything, add new fields, or refactor structures.
+- Always call get_state before proposing a set of edits so you're working from current values, not assumptions.
+- When the user speaks in general terms ("make demand more aggressive", "reflect a 15% price cut", "add a Rubin R100 line at $6/hr"), translate that into concrete numeric patches and show what you changed and why.
+- If the user attaches a spec sheet or vendor doc, compare it to what's already in the dashboard (via get_state) and describe the deltas. Only apply edits if the user asks you to.
+- Keep replies concise. When you make edits, summarize them as a short bulleted list of "old → new".
+
+Parameter surface (top-level keys, all accessible via get_state / update_state):
+- pricing: { trainPrice, infPrice, refTrainPrice, refInfPrice, elastTrain, elastInf } — $/H100e-hr sell prices, reference prices for elasticity anchoring, and elasticities.
+- policy: { priceDecline, costDecline, genMo, genAdv, renewPct, renewTerm } — %/yr price/cost trajectory, next-gen cadence & advance %, and renewal share/term.
+- tokPerHr: scalar — inference tokens per H100e-hr throughput assumption.
+- demandScenario: "weak" | "base" | "strong" — which scenario is active. Editing this stashes the current cohort edits and swaps in the target scenario's cohorts (same behavior as the tab's toggle).
+- scenarioProb: { weak, base, strong } — prior probabilities in percent; should sum to 100.
+- modelMix: array of { id, name, pct, paramsB, activeB } — LLM mix served on the inference pool.
+- baseline: { train: [{ modelB, tokensT, days, mfu, modelBG, tokensTG }...], inf: [{ modelB, bytes, inTok, outTok, effPct, modelBG, inTokG, outTokG }...] } — 24-month workload baseline drivers with monthly growth companions.
+- cohorts: array of { id, name, regions: [{ id, region, custBase, months: [{ addsPct, churnPct }...], infPerCust, runsPerYr, runSize, runDurMo, infFlexPct, trainFlexPct }] } — bottoms-up customer demand build for the ACTIVE scenario.
+- supply: array of supply deals — see get_state for shape (provider, gpu, gpus, structure, rate, termMo, remMo, upfrontPct, pay, region, ic, soldPct, rampMo, status).
+- demand: array of demand positions — see get_state for shape (name, kind, gpu, gpus, fabric, startMo, durationMo, price, status, region, model).
+
+Vendor-spec table and the temporal model's inputs are read-only from your side (not in the parameter surface). If the user asks about vendor SKUs or the temporal analysis, reason from the attached documents and get_state, and tell the user those specific tabs aren't editable via chat.`;
+
+function qaBtn(color) {
+  return {
+    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.15)",
+    color, padding: "7px 12px", borderRadius: 4,
+    fontFamily: "'IBM Plex Mono', 'JetBrains Mono', monospace",
+    fontSize: 11, cursor: "pointer", letterSpacing: "0.02em", whiteSpace: "nowrap",
+  };
+}
+
+function QAMessage({ m }) {
+  const F = "'IBM Plex Mono', 'JetBrains Mono', monospace";
+  const CYAN = "#67e8f9", GRW = "#86efac", AMB = "#fbbf24", VIO = "#c4b5fd";
+  const MUT = "rgba(255,255,255,0.35)", MUT2 = "rgba(255,255,255,0.55)";
+  if (m.role === "user") {
+    return (
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 9, color: MUT, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 3 }}>You</div>
+        <div style={{ background: "rgba(103,232,249,0.06)", border: "1px solid rgba(103,232,249,0.2)", borderRadius: 4, padding: "8px 12px", fontSize: 12, color: "#e2e8f0", whiteSpace: "pre-wrap", fontFamily: F, lineHeight: 1.55 }}>
+          {m.display || m.content}
+          {m.attachments && m.attachments.length > 0 && (
+            <div style={{ marginTop: 6, fontSize: 10, color: MUT2 }}>
+              + attached: {m.attachments.map(a => a.name).join(", ")}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+  if (m.role === "assistant") {
+    return (
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 9, color: MUT, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 3 }}>Assistant</div>
+        {m.content && (
+          <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 4, padding: "8px 12px", fontSize: 12, color: "#e2e8f0", whiteSpace: "pre-wrap", fontFamily: F, lineHeight: 1.55 }}>
+            {m.content}
+          </div>
+        )}
+        {m.tool_calls && m.tool_calls.length > 0 && (
+          <div style={{ marginTop: 4 }}>
+            {m.tool_calls.map((tc, i) => {
+              const args = (tc.function && tc.function.arguments) || "";
+              const shown = args.length > 240 ? args.slice(0, 240) + "…" : args;
+              return (
+                <div key={i} style={{ fontSize: 10, color: VIO, fontFamily: F, marginTop: 2 }}>
+                  → tool call: <span style={{ color: MUT2 }}>{tc.function && tc.function.name}({shown})</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (m.role === "tool") {
+    const raw = m.content || "";
+    const shown = raw.length > 400 ? raw.slice(0, 400) + "…" : raw;
+    return (
+      <div style={{ marginBottom: 8, fontSize: 10, color: GRW, fontFamily: F }}>
+        ← tool result <span style={{ color: MUT2 }}>({m.name}):</span>{" "}
+        <span style={{ color: MUT2 }}>{shown}</span>
+      </div>
+    );
+  }
+  if (m.role === "system-note") {
+    return (
+      <div style={{ marginBottom: 8, fontSize: 10, color: AMB, fontFamily: F, letterSpacing: "0.05em" }}>
+        [ {m.content} ]
+      </div>
+    );
+  }
+  return null;
+}
+
+function QAApp() {
+  const F = TAB_F;
+  const CYAN = "#67e8f9", GRW = "#86efac", AMB = "#fbbf24", RO = "#f87171";
+  const MUT = "rgba(255,255,255,0.35)", MUT2 = "rgba(255,255,255,0.55)";
+
+  const [apiKey, setApiKey] = React.useState(() => (typeof localStorage !== "undefined" ? localStorage.getItem("qa.apiKey") || "" : ""));
+  const [model, setModel] = React.useState(() => (typeof localStorage !== "undefined" ? localStorage.getItem("qa.model") || "anthropic/claude-sonnet-4.5" : "anthropic/claude-sonnet-4.5"));
+  const [showKey, setShowKey] = React.useState(false);
+  const [messages, setMessages] = React.useState([]);
+  const [input, setInput] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [attachments, setAttachments] = React.useState([]);
+  const scrollRef = React.useRef(null);
+
+  React.useEffect(() => { if (typeof localStorage !== "undefined") localStorage.setItem("qa.apiKey", apiKey); }, [apiKey]);
+  React.useEffect(() => { if (typeof localStorage !== "undefined") localStorage.setItem("qa.model", model); }, [model]);
+  React.useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages, busy]);
+
+  const handleAttach = async (files) => {
+    const arr = Array.from(files || []);
+    const next = [];
+    for (const f of arr) {
+      try {
+        const text = await f.text();
+        next.push({ name: f.name, size: f.size, type: f.type || "text/plain", text: text.slice(0, 200000) });
+      } catch (e) {
+        next.push({ name: f.name, size: f.size, type: f.type || "unknown", text: "[unable to read as text: " + (e.message || e) + "]" });
+      }
+    }
+    setAttachments(a => [...a, ...next]);
+  };
+
+  const runTool = (name, args) => {
+    try {
+      if (name === "get_state") return JSON.stringify(qaGetState());
+      if (name === "update_state") return JSON.stringify(qaApplyPatches(args.patches || []));
+      if (name === "add_item") return JSON.stringify(qaAddItem(args.collection, args.item));
+      if (name === "remove_item") return JSON.stringify(qaRemoveItem(args.collection, args.id));
+      return JSON.stringify({ error: "unknown tool: " + name });
+    } catch (e) {
+      return JSON.stringify({ error: String(e.message || e) });
+    }
+  };
+
+  const callOpenRouter = async (chatMsgs) => {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + apiKey,
+        "HTTP-Referer": (typeof window !== "undefined" ? window.location.origin : ""),
+        "X-Title": "Compute Management Dashboard Q&A",
+      },
+      body: JSON.stringify({ model, messages: chatMsgs, tools: QA_TOOLS, tool_choice: "auto" }),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error("OpenRouter " + res.status + ": " + t.slice(0, 400));
+    }
+    return await res.json();
+  };
+
+  const send = async () => {
+    if (!apiKey.trim()) { setError("Enter your OpenRouter API key first."); return; }
+    if (!input.trim() && attachments.length === 0) return;
+    setError("");
+    setBusy(true);
+    let userContent = input.trim();
+    if (attachments.length) {
+      const attStr = attachments.map(a => "── attachment: " + a.name + " (" + a.type + ", " + a.size + " bytes) ──\n" + a.text).join("\n\n");
+      userContent = (userContent ? userContent + "\n\n" : "") + attStr;
+    }
+    const userMsg = { role: "user", content: userContent, display: input.trim(), attachments: attachments.map(a => ({ name: a.name, size: a.size })) };
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
+    setInput("");
+    setAttachments([]);
+    try {
+      let apiMsgs = [{ role: "system", content: QA_SYSTEM }, ...nextMessages.map(m => {
+        const { display, attachments, ...rest } = m;
+        return rest;
+      })];
+      for (let turn = 0; turn < 8; turn++) {
+        const resp = await callOpenRouter(apiMsgs);
+        const choice = resp.choices && resp.choices[0];
+        if (!choice) throw new Error("empty response");
+        const asst = choice.message || {};
+        const asstStored = { role: "assistant", content: asst.content || "", tool_calls: asst.tool_calls || undefined };
+        apiMsgs.push(asstStored);
+        setMessages(m => [...m, asstStored]);
+        if (!asst.tool_calls || !asst.tool_calls.length) break;
+        for (const tc of asst.tool_calls) {
+          let args = {};
+          try { args = JSON.parse(tc.function.arguments || "{}"); } catch (e) { args = { _parse_error: String(e.message || e) }; }
+          const result = runTool(tc.function.name, args);
+          const toolMsg = { role: "tool", tool_call_id: tc.id, name: tc.function.name, content: result };
+          apiMsgs.push(toolMsg);
+          setMessages(m => [...m, toolMsg]);
+        }
+      }
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearChat = () => { setMessages([]); setError(""); };
+  const resetDefaults = () => {
+    if (typeof window !== "undefined" && !window.confirm("Reset all dashboard parameters to defaults? This undoes every edit, including anything the LLM has changed.")) return;
+    qaResetDefaults();
+    setMessages(m => [...m, { role: "system-note", content: "Dashboard parameters reset to defaults." }]);
+  };
+
+  return (
+    <div style={{ padding: "24px 28px 60px", color: "#e2e8f0", fontFamily: F, minHeight: "100vh" }}>
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>Q&A <span style={{ color: AMB }}>— ask the LLM to tweak parameters</span></div>
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginTop: 3, lineHeight: 1.5, maxWidth: 900 }}>
+          Ask questions about the dashboard's parameters, or describe changes in plain English ("bump the training price 15%", "add a Rubin R100 reservation at $6/hr", "make the weak scenario weaker"). The LLM can read and edit any parameter through a tool-call API — it cannot change how the dashboard computes anything. Attach spec sheets or vendor docs as plain text (.txt / .md / .csv / .json / .tsv) to compare them against what's in the model.
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1.4fr auto auto", gap: 10, alignItems: "end", marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 9, color: MUT, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>OpenRouter API key</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input
+              type={showKey ? "text" : "password"}
+              value={apiKey}
+              onChange={e => setApiKey(e.target.value)}
+              placeholder="sk-or-v1-…"
+              style={{ flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, padding: "7px 10px", color: "#e2e8f0", fontFamily: F, fontSize: 12 }}
+            />
+            <button onClick={() => setShowKey(s => !s)} style={qaBtn(MUT2)}>{showKey ? "hide" : "show"}</button>
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: MUT, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>Model (OpenRouter id)</div>
+          <input
+            value={model}
+            onChange={e => setModel(e.target.value)}
+            placeholder="anthropic/claude-sonnet-4.5"
+            style={{ width: "100%", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, padding: "7px 10px", color: "#e2e8f0", fontFamily: F, fontSize: 12 }}
+          />
+        </div>
+        <button onClick={clearChat} style={qaBtn(MUT2)}>Clear chat</button>
+        <button onClick={resetDefaults} title="Restore all editable parameters to the values that were loaded when the dashboard first opened." style={{ ...qaBtn(AMB), fontWeight: 600 }}>Reset defaults</button>
+      </div>
+
+      <div ref={scrollRef} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: 14, minHeight: 400, maxHeight: 560, overflowY: "auto", marginBottom: 12 }}>
+        {messages.length === 0 && (
+          <div style={{ color: MUT, fontSize: 12, lineHeight: 1.7 }}>
+            Ready. Try something like:<br />
+            <span style={{ color: MUT2 }}>• "What's the current supply book weighted-average rate?"</span><br />
+            <span style={{ color: MUT2 }}>• "Attach this Rubin R100 spec sheet — how does it fit relative to the B300 I already have?"</span><br />
+            <span style={{ color: MUT2 }}>• "Switch to the strong demand scenario and drop training elasticity to 1.0."</span><br />
+            <span style={{ color: MUT2 }}>• "Assume enterprise adds are 50% higher — update the base scenario cohorts."</span>
+          </div>
+        )}
+        {messages.map((m, i) => <QAMessage key={i} m={m} />)}
+        {busy && <div style={{ color: MUT, fontSize: 11, marginTop: 8 }}>… waiting on model …</div>}
+        {error && <div style={{ color: RO, fontSize: 11, marginTop: 8, background: "rgba(248,113,113,0.08)", padding: "6px 10px", borderRadius: 4 }}>{error}</div>}
+      </div>
+
+      {attachments.length > 0 && (
+        <div style={{ marginBottom: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {attachments.map((a, i) => (
+            <div key={i} style={{ background: "rgba(103,232,249,0.08)", border: "1px solid rgba(103,232,249,0.25)", borderRadius: 4, padding: "4px 8px", fontSize: 11, color: CYAN, display: "flex", alignItems: "center", gap: 8 }}>
+              <span>{a.name}</span>
+              <span style={{ color: MUT }}>{(a.size / 1024).toFixed(1)} KB</span>
+              <button onClick={() => setAttachments(l => l.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: MUT2, cursor: "pointer", padding: 0, fontFamily: F, fontSize: 13, lineHeight: 1 }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <label style={{ ...qaBtn(MUT2), cursor: "pointer", display: "inline-block" }}>
+          + attach
+          <input type="file" multiple style={{ display: "none" }} onChange={e => { handleAttach(e.target.files); e.target.value = ""; }} accept=".txt,.md,.csv,.json,.tsv,.log,text/*" />
+        </label>
+        <textarea
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } }}
+          placeholder="Ask a question or describe a change… (Ctrl/Cmd+Enter to send)"
+          rows={3}
+          disabled={busy}
+          style={{ flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, padding: "8px 10px", color: "#e2e8f0", fontFamily: F, fontSize: 12, resize: "vertical" }}
+        />
+        <button onClick={send} disabled={busy} style={{ ...qaBtn(CYAN), fontWeight: 700 }}>{busy ? "…" : "Send"}</button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [side, setSide] = useState("instructions");
   const tabs = [
     { key: "instructions", label: "INSTRUCTIONS", sub: "how to read this dashboard" },
+    { key: "qa", label: "Q&A", sub: "ask the LLM to tweak parameters" },
     { key: "projections", label: "PROJECTIONS", sub: "compute outlook & financials" },
     { key: "demand", label: "COMPUTE DEMAND", sub: "demand book & run sizing" },
     { key: "supply", label: "COMPUTE SUPPLY", sub: "supply book & deal intake" },
@@ -5967,6 +6544,7 @@ export default function App() {
       <div style={{ display: side === "supply" ? "block" : "none" }}><SupplySideApp /></div>
       <div style={{ display: side === "vendor" ? "block" : "none" }}><VendorSpecApp /></div>
       <div style={{ display: side === "temporal" ? "block" : "none" }}><TemporalApp /></div>
+      <div style={{ display: side === "qa" ? "block" : "none" }}><QAApp /></div>
     </div>
   );
 }
