@@ -502,7 +502,7 @@ const fmtPct = (n, d = 0) => (n * 100).toFixed(d) + "%";
 
 function Metric({ label, value, sub, accent, warn }) {
   return (
-    <div style={{ background: warn ? "rgba(248,113,113,0.06)" : "rgba(255,255,255,0.02)", border: `1px solid ${warn ? "rgba(248,113,113,0.15)" : "rgba(255,255,255,0.05)"}`, borderRadius: 8, padding: "10px 12px", flex: "1 1 150px", minWidth: 150 }}>
+    <div style={{ background: warn ? "rgba(248,113,113,0.1)" : "rgba(255,255,255,0.06)", border: `1px solid ${warn ? "rgba(248,113,113,0.28)" : "rgba(255,255,255,0.11)"}`, borderRadius: 8, padding: "10px 12px", flex: "1 1 150px", minWidth: 150 }}>
       <div style={{ fontSize: 10, color: warn ? "rgba(248,113,113,0.7)" : "rgba(255,255,255,0.35)", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 2, fontFamily: F }}>{label}</div>
       <div style={{ fontSize: 17, fontWeight: 700, color: accent || "#e2e8f0", fontFamily: F, letterSpacing: "-0.02em", lineHeight: 1.15, wordBreak: "break-word" }}>{value}</div>
       {sub && <div style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 2, fontFamily: F }}>{sub}</div>}
@@ -535,7 +535,7 @@ function Select({ label, value, onChange, options, hint }) {
 }
 function Section({ title, children, style: s }) {
   return (
-    <div style={{ background: "rgba(255,255,255,0.015)", borderRadius: 8, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.04)", ...s }}>
+    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.1)", ...s }}>
       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10, fontFamily: F, fontWeight: 600 }}>{title}</div>
       {children}
     </div>
@@ -1410,6 +1410,234 @@ function App() {
           </div>
         </div>
 
+        {/* ═════════════════════════════════════════════════════════════════════
+            SUMMARY STATS — moved to the top of the tab so the fleet-level view
+            (composition cuts + which LLMs the supply can host) is the first
+            thing visible, before drilling into the deal-level supply book.
+            ═════════════════════════════════════════════════════════════════════ */}
+        <SectionHeader title="Summary Stats" />
+
+        {/* Composition of the fleet, four cuts */}
+        <Section title="Fleet composition — H100e by region, provider, GPU type, contract type" style={{ marginBottom: 12 }}>
+          {(() => {
+            const act = book.filter(r => r.status === "active");
+            const H = r => h100eOf(r, normMode) * liveFracOf(r, 1);
+            const group = (keyFn) => {
+              const m = {};
+              for (const r of act) { const k = keyFn(r); m[k] = (m[k] || 0) + H(r); }
+              return Object.entries(m).map(([k, v]) => ({ k, v })).sort((a, b) => b.v - a.v);
+            };
+            const contractType = r => r.structure === "ondemand" ? "On-demand" : r.structure === "spot" ? "Spot" : r.termMo >= 48 ? "5yr reserved" : r.termMo >= 30 ? "3yr reserved" : r.termMo >= 18 ? "2yr reserved" : r.termMo >= 9 ? "1yr reserved" : "<1yr reserved";
+            const cuts = [
+              ["By region", group(r => r.region), "#34d399"],
+              ["By provider", group(r => r.provider), "#fbbf24"],
+              ["By GPU type", group(r => r.gpu), "#a78bfa"],
+              ["By contract type", group(contractType), "#67e8f9"],
+            ];
+            return (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 18 }}>
+                {cuts.map(([title, rows, color]) => {
+                  const total = rows.reduce((s, r) => s + r.v, 0);
+                  return (
+                    <div key={title}>
+                      <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", fontFamily: F, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>{title}</div>
+                      {rows.map(r => {
+                        const pct = total > 0 ? r.v / total : 0;
+                        return (
+                          <div key={r.k} style={{ marginBottom: 7 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, fontFamily: F, marginBottom: 2 }}>
+                              <span style={{ color: "rgba(255,255,255,0.6)" }}>{r.k}</span>
+                              <span style={{ color, fontWeight: 600 }} title={`${fmtBig(Math.round(r.v))} H100e`}>{(pct * 100).toFixed(0)}%</span>
+                            </div>
+                            <div style={{ height: 6, background: "rgba(255,255,255,0.04)", borderRadius: 3 }}>
+                              <div style={{ height: "100%", width: `${pct * 100}%`, background: color, opacity: 0.65, borderRadius: 3 }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 6, lineHeight: 1.5 }}>
+            Share of delivered H100-equivalent capacity across the active book, cut four ways. Contract-type buckets group reserved terms (≥48mo → 5yr, ≥30mo → 3yr, ≥18mo → 2yr, ≥9mo → 1yr) plus on-demand and spot. Hover a percentage to see the underlying H100e count.
+          </div>
+        </Section>
+
+        {/* Model serviceability matrix */}
+        <Section title="Model serviceability — which supply can host which LLMs from the Compute Demand mix" style={{ marginBottom: 12 }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: F }}>
+              <thead><tr>
+                <th style={th("left")}>POSITION</th>
+                {dashModels.map(m => <th key={m.key} style={th("center")}>{m.label.toUpperCase()}<div style={{ fontWeight: 400, color: "rgba(255,255,255,0.2)" }}>{m.paramsB}B{m.moe ? " MoE" : ""}</div></th>)}
+              </tr></thead>
+              <tbody>
+                {(() => {
+                  const groups = {};
+                  for (const r of book.filter(x => x.status === "active")) {
+                    const fc = FAB_CLASS(r.ic), k = r.gpu + "|" + fc;
+                    groups[k] = groups[k] || { gpu: r.gpu, fc, rows: [] };
+                    groups[k].rows.push(r);
+                  }
+                  const order = Object.keys(SUPPLY_GPUS);
+                  const fabOrder = { nvl72: 0, ib32: 1, roce: 2, eth: 3 };
+                  return Object.values(groups).sort((a, b) => (order.indexOf(a.gpu) - order.indexOf(b.gpu)) || ((fabOrder[a.fc] ?? 9) - (fabOrder[b.fc] ?? 9)));
+                })().map(g => {
+                  const totalGpus = g.rows.reduce((s, r) => s + r.gpus, 0);
+                  const freeGpus = g.rows.reduce((s, r) => s + r.gpus * liveFracOf(r, 1) * (1 - (r.soldPct || 0) / 100), 0);
+                  const maxPos = Math.max(...g.rows.map(r => r.gpus));
+                  const host = hostability(g.gpu, g.fc, maxPos, dashModels);
+                  return (
+                    <React.Fragment key={g.gpu + g.fc}>
+                      <tr style={{ background: "rgba(251,191,36,0.03)" }}>
+                        <td style={td({ color: "#e2e8f0", whiteSpace: "nowrap", fontWeight: 600, borderTop: "1px solid rgba(255,255,255,0.06)" })}>
+                          {SUPPLY_GPUS[g.gpu].label} <span style={{ color: g.fc === "eth" ? "rgba(248,113,113,0.6)" : "#6ee7b7", fontSize: 9 }}>{FAB_LABEL[g.fc] || g.fc}</span>
+                          <span style={{ color: "rgba(255,255,255,0.35)", fontWeight: 400 }}> ×{totalGpus.toLocaleString()}</span>
+                          <span style={{ color: freeGpus / Math.max(totalGpus, 1) > 0.35 ? AMB : "rgba(255,255,255,0.3)", fontWeight: 400, fontSize: 9 }}> · {Math.round(freeGpus).toLocaleString()} free</span>
+                        </td>
+                        {host.map(h => (
+                          <td key={h.key} style={td({ textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)" })} title={h.fp16 ? `FP16 · min ${h.fp16} GPU/replica${h.fp8 ? ` (FP8: ${h.fp8})` : ""}` : h.fp8 ? `FP8 only · min ${h.fp8} GPU/replica` : "does not fit within fabric pooling limit"}>
+                            {h.fp16 ? <span style={{ color: "#6ee7b7", fontWeight: 700 }}>16</span> : h.fp8 ? <span style={{ color: AMB, fontWeight: 700 }}>8</span> : <span style={{ color: "rgba(255,255,255,0.12)" }}>—</span>}
+                          </td>
+                        ))}
+                      </tr>
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ fontSize: 9, color: "rgba(255,255,255,0.2)", marginTop: 8, lineHeight: 1.5 }}>
+            Each row is a fleet capability class — GPU type × fabric — with total GPUs and free capacity across the class. 16 = servable at FP16 weights, 8 = FP8 only, — = doesn't fit; hover for min GPUs per replica. Class capability is tested at the largest single cluster in the class, since clusters at different providers can't shard one replica. Fit test: pooled usable VRAM (85% of raw, pool capped by fabric — NVL72 72, IB 32, RoCE/NVLink4 8, plain Ethernet 1) ≥ weights × 1.2 for KV + activations. MoE models load ALL experts. Model set is the LLM mix on the Compute Demand tab — edit that table to change the columns here.
+          </div>
+        </Section>
+
+        {/* Chip mix vs. workload mix — pool balance + per-chip $-efficiency.
+            Sits as the last box in Summary Stats: same fleet-level view as
+            Fleet Composition, but cut by workload-fit (compute vs. inference
+            pool) rather than by region/provider/GPU/contract. */}
+        <Section title="Chip mix vs. workload mix — pool balance & per-chip $-efficiency" style={{ marginBottom: 12 }}>
+          {(() => {
+            const act = book.filter(r => r.status === "active");
+            const CROSS = 0.7; // off-pool capacity penalty, mirrors Projections engine
+            const poolsAt = (m) => {
+              const p = { compute: 0, balanced: 0, inference: 0 };
+              for (const r of act) p[POOL_OF(r.gpu)] += h100eOf(r, normMode) * liveFracOf(r, m);
+              return p;
+            };
+            const match = (p, dTrain, dInf) => {
+              let sT = Math.min(dTrain, p.compute), sI = Math.min(dInf, p.inference);
+              let nT = dTrain - sT, nI = dInf - sI, bal = p.balanced;
+              const tot = nT + nI;
+              if (tot > 0 && bal > 0) { const u = Math.min(bal, tot); sT += u * nT / tot; sI += u * nI / tot; nT -= u * nT / tot; nI -= u * nI / tot; bal -= u; }
+              let cross = 0;
+              const idleC = Math.max(0, p.compute - Math.min(dTrain, p.compute)), idleI = Math.max(0, p.inference - Math.min(dInf, p.inference));
+              if (nT > 0 && idleI > 0) { const c = Math.min(nT, idleI * CROSS); sT += c; nT -= c; cross += c; }
+              if (nI > 0 && idleC > 0) { const c = Math.min(nI, idleC * CROSS); sI += c; nI -= c; cross += c; }
+              return { short: nT + nI, cross, natInfCover: dInf > 0 ? Math.min(1, p.inference / dInf) : 1 };
+            };
+            const views = [
+              { lbl: "Today", pools: poolsAt(1), dT: demSeries.train[0] || 0, dI: demSeries.inf[0] || 0 },
+              { lbl: "Month 12", pools: poolsAt(12), dT: demSeries.train[11] || 0, dI: demSeries.inf[11] || 0 },
+            ];
+            const barRow = (label, segs, total) => (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9.5, fontFamily: F, marginBottom: 3 }}>
+                  <span style={{ color: "rgba(255,255,255,0.45)" }}>{label}</span>
+                  <span style={{ color: "rgba(255,255,255,0.55)" }}>{fmtBig(Math.round(total))} H100e</span>
+                </div>
+                <div style={{ display: "flex", height: 14, borderRadius: 4, overflow: "hidden", background: "rgba(255,255,255,0.03)" }}>
+                  {segs.filter(s => s.v > 0).map(s => (
+                    <div key={s.k} title={`${s.k}: ${fmtBig(Math.round(s.v))} H100e (${(s.v / Math.max(total, 1) * 100).toFixed(0)}%)`}
+                      style={{ width: `${s.v / Math.max(total, 1) * 100}%`, background: s.color, opacity: 0.75, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      {s.v / total > 0.12 && <span style={{ fontSize: 7.5, fontWeight: 700, color: "#0b1118", fontFamily: F }}>{s.k.toUpperCase()}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+
+            const chips = Object.keys(SUPPLY_GPUS);
+            const trainEff = k => (SUPPLY_GPUS[k].tflops / SUPPLY_GPUS[k].market) / (SUPPLY_GPUS.H100.tflops / SUPPLY_GPUS.H100.market);
+            const infEff = k => (SUPPLY_GPUS[k].bw / SUPPLY_GPUS[k].market) / (SUPPLY_GPUS.H100.bw / SUPPLY_GPUS.H100.market);
+            const trainH = Math.round(demSeries.train[0] || 0), infH = Math.round(demSeries.inf[0] || 0), totH = Math.max(1, trainH + infH);
+            const rows = chips.map(k => ({ k, g: SUPPLY_GPUS[k], train: trainEff(k), inf: infEff(k) })).sort((a, b) => Math.max(b.train, b.inf) - Math.max(a.train, a.inf));
+            const bestTrain = rows.reduce((m, r) => r.train > m.train ? r : m, rows[0]);
+            const bestInf = rows.reduce((m, r) => r.inf > m.inf ? r : m, rows[0]);
+
+            const subHeading = (txt) => (
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", fontWeight: 600, fontFamily: F, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>{txt}</div>
+            );
+
+            return (
+              <>
+                {subHeading("Pool balance — is the fleet mix right for the workload mix?")}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18 }}>
+                  {views.map(v => {
+                    const supTot = v.pools.compute + v.pools.balanced + v.pools.inference;
+                    const demTot = v.dT + v.dI;
+                    const mm = match(v.pools, v.dT, v.dI);
+                    return (
+                      <div key={v.lbl}>
+                        <div style={{ fontSize: 10, color: "#e2e8f0", fontWeight: 700, fontFamily: F, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{v.lbl}</div>
+                        {barRow("Supply by pool", [
+                          { k: "compute", v: v.pools.compute, color: POOL_META.compute.color },
+                          { k: "balanced", v: v.pools.balanced, color: POOL_META.balanced.color },
+                          { k: "inference", v: v.pools.inference, color: POOL_META.inference.color },
+                        ], supTot)}
+                        {barRow("Demand by workload", [
+                          { k: "training", v: v.dT, color: POOL_META.compute.color },
+                          { k: "inference", v: v.dI, color: POOL_META.inference.color },
+                        ], demTot)}
+                        <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.45)", fontFamily: F, lineHeight: 1.55, marginTop: 4 }}>
+                          Inference pool covers <span style={{ color: POOL_META.inference.color, fontWeight: 700 }}>{fmtPct(mm.natInfCover)}</span> of inference demand natively; the rest rides the balanced reservoir.
+                          {mm.cross > 0.5 && <span style={{ color: AMB }}> ⚠ {fmtBig(Math.round(mm.cross))} H100e cross-served off-pool at 30% capacity loss — wrong chips for the workload.</span>}
+                          {mm.short > 0.5 ? <span style={{ color: "#f87171" }}> ⚠ {fmtBig(Math.round(mm.short))} H100e SHORT even after cross-serving.</span> : mm.cross <= 0.5 ? <span style={{ color: "#6ee7b7" }}> Mix is clean — no forced cross-serving.</span> : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ height: 1, background: "rgba(255,255,255,0.06)", margin: "20px 0 16px" }} />
+
+                {subHeading("Per-chip $-efficiency — which GPU fits which workload")}
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
+                    <thead><tr>
+                      <th style={th("left")}>GPU</th><th style={th()}>BF16 TFLOPS</th><th style={th()}>MEM BW TB/s</th><th style={th()}>MKT $/HR</th>
+                      <th style={th()}>TRAINING $-EFF</th><th style={th()}>INFERENCE $-EFF</th><th style={th("left")}>BEST FOR</th>
+                    </tr></thead>
+                    <tbody>
+                      {rows.map(r => {
+                        const lean = r.train > r.inf * 1.05 ? "training" : r.inf > r.train * 1.05 ? "inference" : "either";
+                        return (
+                          <tr key={r.k}>
+                            <td style={td({ color: "#e2e8f0", fontWeight: 600 })}>{r.g.label}</td>
+                            <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{r.g.tflops.toLocaleString()}</td>
+                            <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{r.g.bw.toFixed(2)}</td>
+                            <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{fmtUSD(r.g.market, 2)}</td>
+                            <td style={td({ textAlign: "right", color: r.k === bestTrain.k ? "#c4b5fd" : "rgba(255,255,255,0.55)", fontWeight: r.k === bestTrain.k ? 700 : 400 })}>{r.train.toFixed(2)}×</td>
+                            <td style={td({ textAlign: "right", color: r.k === bestInf.k ? "#67e8f9" : "rgba(255,255,255,0.55)", fontWeight: r.k === bestInf.k ? 700 : 400 })}>{r.inf.toFixed(2)}×</td>
+                            <td style={td({ color: lean === "training" ? "#c4b5fd" : lean === "inference" ? "#67e8f9" : "rgba(255,255,255,0.4)", fontSize: 10 })}>{lean}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 10, lineHeight: 1.6 }}>
+                  Pools classified by FLOPs:bandwidth ratio vs H100 — <span style={{ color: POOL_META.compute.color }}>compute</span> (&gt; 1.15, training), <span style={{ color: POOL_META.inference.color }}>inference</span> (&lt; 0.87, decode), <span style={{ color: POOL_META.balanced.color }}>balanced</span> (H100, B200 — usable either way). Matching mirrors the Projections engine: native pools first, balanced pro-rata, then off-pool cross-serve at 30% capacity loss. <span style={{ color: "#c4b5fd" }}>Training $-eff</span> = TFLOPs ÷ $/hr (raw FLOPs bottleneck); <span style={{ color: "#67e8f9" }}>inference $-eff</span> = memory BW ÷ $/hr (decode streams weights + KV per token) — both normalized to H100 = 1.00×. Buy-side rule: size reserved compute-dense capacity to the {fmtPct(trainH / totH)} training share and bandwidth-dense capacity to the {fmtPct(infH / totH)} inference share; re-check as the Compute Demand baselines shift.
+                </div>
+              </>
+            );
+          })()}
+        </Section>
+
         <SectionHeader title="Supply Book" />
 
         {/* Book aggregates */}
@@ -1523,9 +1751,10 @@ function App() {
           Scenario-driven vendor-commit optimizer. Reads the weak/base/strong cohort demand builds from the Compute Demand tab as CORRELATED states of the world (one coherent "weak future" applied across all cohorts — the tail is real, not the intersection of independent worst cases). Reports ONE recommended book of sign / renew / lapse decisions, scored on expected profit and gated on weak-case solvency. The six stages below describe the flow from demand to recommendation.
         </div>
 
-        {/* How the engine works — six-box explainer, same visual pattern as
-            the vendor diligence framework checklist boxes */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10, marginBottom: 16 }}>
+        {/* How the engine works — six-box explainer laid out as an explicit
+            3×2 grid (rather than auto-fit) so the six stages always sit in
+            two neat rows with the same three columns per row. */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 16 }}>
           {[
             {
               stage: "1 · Aggregate demand & supply",
@@ -1576,7 +1805,7 @@ function App() {
               ],
             },
           ].map(st => (
-            <div key={st.stage} style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 6, padding: "10px 12px" }}>
+            <div key={st.stage} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 6, padding: "10px 12px" }}>
               <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.6)", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 7, fontFamily: F }}>{st.stage}</div>
               {st.items.map((it, i) => (
                 <div key={i} style={{ display: "flex", gap: 6, fontSize: 9.5, color: "rgba(255,255,255,0.5)", lineHeight: 1.5, marginBottom: 5, fontFamily: F }}>
@@ -1917,242 +2146,6 @@ function App() {
         </Section>
 
 
-        <SectionHeader title="Summary Stats" />
-
-        {/* Composition of the fleet, four cuts */}
-        <Section title="Fleet composition — H100e by region, provider, GPU type, contract type" style={{ marginBottom: 12 }}>
-          {(() => {
-            const act = book.filter(r => r.status === "active");
-            const H = r => h100eOf(r, normMode) * liveFracOf(r, 1);
-            const group = (keyFn) => {
-              const m = {};
-              for (const r of act) { const k = keyFn(r); m[k] = (m[k] || 0) + H(r); }
-              return Object.entries(m).map(([k, v]) => ({ k, v })).sort((a, b) => b.v - a.v);
-            };
-            const contractType = r => r.structure === "ondemand" ? "On-demand" : r.structure === "spot" ? "Spot" : r.termMo >= 48 ? "5yr reserved" : r.termMo >= 30 ? "3yr reserved" : r.termMo >= 18 ? "2yr reserved" : r.termMo >= 9 ? "1yr reserved" : "<1yr reserved";
-            const cuts = [
-              ["By region", group(r => r.region), "#34d399"],
-              ["By provider", group(r => r.provider), "#fbbf24"],
-              ["By GPU type", group(r => r.gpu), "#a78bfa"],
-              ["By contract type", group(contractType), "#67e8f9"],
-            ];
-            return (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 18 }}>
-                {cuts.map(([title, rows, color]) => {
-                  const total = rows.reduce((s, r) => s + r.v, 0);
-                  return (
-                    <div key={title}>
-                      <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", fontFamily: F, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>{title}</div>
-                      {rows.map(r => {
-                        const pct = total > 0 ? r.v / total : 0;
-                        return (
-                          <div key={r.k} style={{ marginBottom: 7 }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, fontFamily: F, marginBottom: 2 }}>
-                              <span style={{ color: "rgba(255,255,255,0.6)" }}>{r.k}</span>
-                              <span style={{ color, fontWeight: 600 }} title={`${fmtBig(Math.round(r.v))} H100e`}>{(pct * 100).toFixed(0)}%</span>
-                            </div>
-                            <div style={{ height: 6, background: "rgba(255,255,255,0.04)", borderRadius: 3 }}>
-                              <div style={{ height: "100%", width: `${pct * 100}%`, background: color, opacity: 0.65, borderRadius: 3 }} />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 6, lineHeight: 1.5 }}>
-            Share of delivered H100-equivalent capacity across the active book, cut four ways. Contract-type buckets group reserved terms (≥48mo → 5yr, ≥30mo → 3yr, ≥18mo → 2yr, ≥9mo → 1yr) plus on-demand and spot. Hover a percentage to see the underlying H100e count.
-          </div>
-        </Section>
-
-        {/* Model serviceability matrix — moved above the heterogeneous pool
-            analysis so the fleet-composition percentages are read alongside
-            "which models each class of the fleet can actually host". Models
-            are the mix from the Compute Demand tab (single source of truth). */}
-        <Section title="Model serviceability — which supply can host which LLMs from the Compute Demand mix" style={{ marginBottom: 12 }}>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: F }}>
-              <thead><tr>
-                <th style={th("left")}>POSITION</th>
-                {dashModels.map(m => <th key={m.key} style={th("center")}>{m.label.toUpperCase()}<div style={{ fontWeight: 400, color: "rgba(255,255,255,0.2)" }}>{m.paramsB}B{m.moe ? " MoE" : ""}</div></th>)}
-              </tr></thead>
-              <tbody>
-                {(() => {
-                  const groups = {};
-                  for (const r of book.filter(x => x.status === "active")) {
-                    const fc = FAB_CLASS(r.ic), k = r.gpu + "|" + fc;
-                    groups[k] = groups[k] || { gpu: r.gpu, fc, rows: [] };
-                    groups[k].rows.push(r);
-                  }
-                  const order = Object.keys(SUPPLY_GPUS);
-                  const fabOrder = { nvl72: 0, ib32: 1, roce: 2, eth: 3 };
-                  return Object.values(groups).sort((a, b) => (order.indexOf(a.gpu) - order.indexOf(b.gpu)) || ((fabOrder[a.fc] ?? 9) - (fabOrder[b.fc] ?? 9)));
-                })().map(g => {
-                  const totalGpus = g.rows.reduce((s, r) => s + r.gpus, 0);
-                  const freeGpus = g.rows.reduce((s, r) => s + r.gpus * liveFracOf(r, 1) * (1 - (r.soldPct || 0) / 100), 0);
-                  const maxPos = Math.max(...g.rows.map(r => r.gpus));
-                  // Class capability uses the largest single cluster — separate
-                  // providers' clusters can't shard one replica between them.
-                  const host = hostability(g.gpu, g.fc, maxPos, dashModels);
-                  return (
-                    <React.Fragment key={g.gpu + g.fc}>
-                      <tr style={{ background: "rgba(251,191,36,0.03)" }}>
-                        <td style={td({ color: "#e2e8f0", whiteSpace: "nowrap", fontWeight: 600, borderTop: "1px solid rgba(255,255,255,0.06)" })}>
-                          {SUPPLY_GPUS[g.gpu].label} <span style={{ color: g.fc === "eth" ? "rgba(248,113,113,0.6)" : "#6ee7b7", fontSize: 9 }}>{FAB_LABEL[g.fc] || g.fc}</span>
-                          <span style={{ color: "rgba(255,255,255,0.35)", fontWeight: 400 }}> ×{totalGpus.toLocaleString()}</span>
-                          <span style={{ color: freeGpus / Math.max(totalGpus, 1) > 0.35 ? AMB : "rgba(255,255,255,0.3)", fontWeight: 400, fontSize: 9 }}> · {Math.round(freeGpus).toLocaleString()} free</span>
-                        </td>
-                        {host.map(h => (
-                          <td key={h.key} style={td({ textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)" })} title={h.fp16 ? `FP16 · min ${h.fp16} GPU/replica${h.fp8 ? ` (FP8: ${h.fp8})` : ""}` : h.fp8 ? `FP8 only · min ${h.fp8} GPU/replica` : "does not fit within fabric pooling limit"}>
-                            {h.fp16 ? <span style={{ color: "#6ee7b7", fontWeight: 700 }}>16</span> : h.fp8 ? <span style={{ color: AMB, fontWeight: 700 }}>8</span> : <span style={{ color: "rgba(255,255,255,0.12)" }}>—</span>}
-                          </td>
-                        ))}
-                      </tr>
-                    </React.Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div style={{ fontSize: 9, color: "rgba(255,255,255,0.2)", marginTop: 8, lineHeight: 1.5 }}>
-            Each row is a fleet capability class — GPU type × fabric — with total GPUs and free capacity across the class. 16 = servable at FP16 weights, 8 = FP8 only, — = doesn't fit; hover for min GPUs per replica. Class capability is tested at the largest single cluster in the class, since clusters at different providers can't shard one replica. Fit test: pooled usable VRAM (85% of raw, pool capped by fabric — NVL72 72, IB 32, RoCE/NVLink4 8, plain Ethernet 1) ≥ weights × 1.2 for KV + activations. MoE models load ALL experts. Model set is the LLM mix on the Compute Demand tab — edit that table to change the columns here.
-          </div>
-        </Section>
-
-        <SectionHeader title="Heterogeneous Workload Supply" />
-
-        {/* Pool balance — chip mix vs workload mix */}
-        <Section title="Pool balance — is the chip mix right for the workload mix?" style={{ marginBottom: 12 }}>
-          {(() => {
-            const act = book.filter(r => r.status === "active");
-            const CROSS = 0.7; // off-pool capacity penalty, mirrors Projections engine
-            const poolsAt = (m) => {
-              const p = { compute: 0, balanced: 0, inference: 0 };
-              for (const r of act) p[POOL_OF(r.gpu)] += h100eOf(r, normMode) * liveFracOf(r, m);
-              return p;
-            };
-            // Mirror the engine's matching: native pool → balanced pro-rata → penalized cross-serve
-            const match = (p, dTrain, dInf) => {
-              let sT = Math.min(dTrain, p.compute), sI = Math.min(dInf, p.inference);
-              let nT = dTrain - sT, nI = dInf - sI, bal = p.balanced;
-              const tot = nT + nI;
-              if (tot > 0 && bal > 0) { const u = Math.min(bal, tot); sT += u * nT / tot; sI += u * nI / tot; nT -= u * nT / tot; nI -= u * nI / tot; bal -= u; }
-              let cross = 0;
-              const idleC = Math.max(0, p.compute - Math.min(dTrain, p.compute)), idleI = Math.max(0, p.inference - Math.min(dInf, p.inference));
-              if (nT > 0 && idleI > 0) { const c = Math.min(nT, idleI * CROSS); sT += c; nT -= c; cross += c; }
-              if (nI > 0 && idleC > 0) { const c = Math.min(nI, idleC * CROSS); sI += c; nI -= c; cross += c; }
-              return { short: nT + nI, cross, natInfCover: dInf > 0 ? Math.min(1, p.inference / dInf) : 1 };
-            };
-            const views = [
-              { lbl: "Today", pools: poolsAt(1), dT: demSeries.train[0] || 0, dI: demSeries.inf[0] || 0 },
-              { lbl: "Month 12", pools: poolsAt(12), dT: demSeries.train[11] || 0, dI: demSeries.inf[11] || 0 },
-            ];
-            const barRow = (label, segs, total) => (
-              <div style={{ marginBottom: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9.5, fontFamily: F, marginBottom: 3 }}>
-                  <span style={{ color: "rgba(255,255,255,0.45)" }}>{label}</span>
-                  <span style={{ color: "rgba(255,255,255,0.55)" }}>{fmtBig(Math.round(total))} H100e</span>
-                </div>
-                <div style={{ display: "flex", height: 14, borderRadius: 4, overflow: "hidden", background: "rgba(255,255,255,0.03)" }}>
-                  {segs.filter(s => s.v > 0).map(s => (
-                    <div key={s.k} title={`${s.k}: ${fmtBig(Math.round(s.v))} H100e (${(s.v / Math.max(total, 1) * 100).toFixed(0)}%)`}
-                      style={{ width: `${s.v / Math.max(total, 1) * 100}%`, background: s.color, opacity: 0.75, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      {s.v / total > 0.12 && <span style={{ fontSize: 7.5, fontWeight: 700, color: "#0b1118", fontFamily: F }}>{s.k.toUpperCase()}</span>}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-            return (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18 }}>
-                {views.map(v => {
-                  const supTot = v.pools.compute + v.pools.balanced + v.pools.inference;
-                  const demTot = v.dT + v.dI;
-                  const mm = match(v.pools, v.dT, v.dI);
-                  return (
-                    <div key={v.lbl}>
-                      <div style={{ fontSize: 10, color: "#e2e8f0", fontWeight: 700, fontFamily: F, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{v.lbl}</div>
-                      {barRow("Supply by pool", [
-                        { k: "compute", v: v.pools.compute, color: POOL_META.compute.color },
-                        { k: "balanced", v: v.pools.balanced, color: POOL_META.balanced.color },
-                        { k: "inference", v: v.pools.inference, color: POOL_META.inference.color },
-                      ], supTot)}
-                      {barRow("Demand by workload", [
-                        { k: "training", v: v.dT, color: POOL_META.compute.color },
-                        { k: "inference", v: v.dI, color: POOL_META.inference.color },
-                      ], demTot)}
-                      <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.45)", fontFamily: F, lineHeight: 1.55, marginTop: 4 }}>
-                        Inference pool covers <span style={{ color: POOL_META.inference.color, fontWeight: 700 }}>{fmtPct(mm.natInfCover)}</span> of inference demand natively; the rest rides the balanced reservoir.
-                        {mm.cross > 0.5 && <span style={{ color: AMB }}> ⚠ {fmtBig(Math.round(mm.cross))} H100e cross-served off-pool at 30% capacity loss — wrong chips for the workload.</span>}
-                        {mm.short > 0.5 ? <span style={{ color: "#f87171" }}> ⚠ {fmtBig(Math.round(mm.short))} H100e SHORT even after cross-serving.</span> : mm.cross <= 0.5 ? <span style={{ color: "#6ee7b7" }}> Mix is clean — no forced cross-serving.</span> : null}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
-          <div style={{ fontSize: 9, color: "rgba(255,255,255,0.2)", marginTop: 10, lineHeight: 1.5 }}>
-            Chips are classified by FLOPs:bandwidth ratio vs H100 — <span style={{ color: POOL_META.compute.color }}>compute</span> (ratio &gt; 1.15, dense-FLOP → training), <span style={{ color: POOL_META.inference.color }}>inference</span> (&lt; 0.87, high-bandwidth → decode; H200's whole premium), and <span style={{ color: POOL_META.balanced.color }}>balanced</span> (H100, B200 — usable by either at full efficiency). Matching mirrors the Projections engine: native pools first, balanced reservoir pro-rata, then off-pool cross-serving at 30% capacity loss. Demand comes live from the Compute Demand tab's cohort build; the per-chip $-efficiency ranking behind this split is the chip-selection table directly below. Buy-side takeaway: when the inference bar outgrows the inference + balanced pools, the next reservation should be H200/high-BW class regardless of headline $/H100e.
-          </div>
-        </Section>
-
-        {/* Heterogeneous chip fit — which chips to BUY for which workload (moved from Compute Demand) */}
-        <Section title="Heterogeneous chip selection — which GPUs fit which workload" style={{ marginBottom: 12 }}>
-          {(() => {
-            // Training is compute-bound (FLOPs); inference DECODE is bandwidth-
-            // bound (streaming weights + KV per token). Score each GPU on a
-            // $-efficiency basis for each regime, normalized to H100 = 1.0.
-            const chips = Object.keys(SUPPLY_GPUS);
-            const trainEff = k => (SUPPLY_GPUS[k].tflops / SUPPLY_GPUS[k].market) / (SUPPLY_GPUS.H100.tflops / SUPPLY_GPUS.H100.market); // FLOPs per $
-            const infEff = k => (SUPPLY_GPUS[k].bw / SUPPLY_GPUS[k].market) / (SUPPLY_GPUS.H100.bw / SUPPLY_GPUS.H100.market);           // GB/s per $
-            const trainH = Math.round(demSeries.train[0] || 0), infH = Math.round(demSeries.inf[0] || 0), totH = Math.max(1, trainH + infH);
-            const rows = chips.map(k => ({ k, g: SUPPLY_GPUS[k], train: trainEff(k), inf: infEff(k) })).sort((a, b) => Math.max(b.train, b.inf) - Math.max(a.train, a.inf));
-            const bestTrain = rows.reduce((m, r) => r.train > m.train ? r : m, rows[0]);
-            const bestInf = rows.reduce((m, r) => r.inf > m.inf ? r : m, rows[0]);
-            return (
-              <>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
-                  <Metric label="Training demand" value={fmtBig(trainH) + " H100e"} sub={`${fmtPct(trainH / totH)} of mix · compute-bound`} accent="#c4b5fd" />
-                  <Metric label="Inference demand" value={fmtBig(infH) + " H100e"} sub={`${fmtPct(infH / totH)} of mix · bandwidth-bound (decode)`} accent="#67e8f9" />
-                  <Metric label="Best $/FLOP (training)" value={bestTrain.g.label.split(" ")[0]} sub={`${bestTrain.train.toFixed(2)}× H100 FLOPs per $`} accent="#c4b5fd" />
-                  <Metric label="Best $/bandwidth (inference)" value={bestInf.g.label.split(" ")[0]} sub={`${bestInf.inf.toFixed(2)}× H100 GB/s per $`} accent="#67e8f9" />
-                </div>
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
-                    <thead><tr>
-                      <th style={th("left")}>GPU</th><th style={th()}>BF16 TFLOPS</th><th style={th()}>MEM BW TB/s</th><th style={th()}>MKT $/HR</th>
-                      <th style={th()}>TRAINING $-EFF</th><th style={th()}>INFERENCE $-EFF</th><th style={th("left")}>BEST FOR</th>
-                    </tr></thead>
-                    <tbody>
-                      {rows.map(r => {
-                        const lean = r.train > r.inf * 1.05 ? "training" : r.inf > r.train * 1.05 ? "inference" : "either";
-                        return (
-                          <tr key={r.k}>
-                            <td style={td({ color: "#e2e8f0", fontWeight: 600 })}>{r.g.label}</td>
-                            <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{r.g.tflops.toLocaleString()}</td>
-                            <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{r.g.bw.toFixed(2)}</td>
-                            <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{fmtUSD(r.g.market, 2)}</td>
-                            <td style={td({ textAlign: "right", color: r.k === bestTrain.k ? "#c4b5fd" : "rgba(255,255,255,0.55)", fontWeight: r.k === bestTrain.k ? 700 : 400 })}>{r.train.toFixed(2)}×</td>
-                            <td style={td({ textAlign: "right", color: r.k === bestInf.k ? "#67e8f9" : "rgba(255,255,255,0.55)", fontWeight: r.k === bestInf.k ? 700 : 400 })}>{r.inf.toFixed(2)}×</td>
-                            <td style={td({ color: lean === "training" ? "#c4b5fd" : lean === "inference" ? "#67e8f9" : "rgba(255,255,255,0.4)", fontSize: 10 })}>{lean}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 8, lineHeight: 1.6 }}>
-                  Two different bottlenecks, two different "best" chips. <span style={{ color: "#c4b5fd" }}>Training</span> throughput is set by raw FLOPs, so training $-efficiency = TFLOPs ÷ $/hr (normalized to H100): the newest dense-compute parts win. <span style={{ color: "#67e8f9" }}>Inference decode</span> is memory-bandwidth-bound — each token streams the weights + KV cache — so inference $-efficiency = memory bandwidth ÷ $/hr: high-VRAM-bandwidth parts (H200, Blackwell) win even where their FLOPs are wasted. The buy-side takeaway: don't buy one blended pool. Size reserved <span style={{ color: "#c4b5fd" }}>compute-dense</span> capacity to the {fmtPct(trainH / totH)} training share and <span style={{ color: "#67e8f9" }}>bandwidth-dense</span> capacity to the {fmtPct(infH / totH)} inference share, and re-check as the workload baselines on the Compute Demand tab shift the mix. The pool bars above show where today's book actually stands against that split.
-                </div>
-              </>
-            );
-          })()}
-        </Section>
-
         <div style={{ fontSize: 9, color: "rgba(255,255,255,0.18)", marginTop: 16, fontFamily: F, lineHeight: 1.5 }}>
           Market rates, on-demand source rates, and the seed book are illustrative Apr 2026 snapshots — replace with live marketplace data before real intake decisions. Prepay carry uses average outstanding balance × cost of capital; counterparty credit risk on prepaid capital is flagged qualitatively, not priced.
         </div>
@@ -2233,7 +2226,7 @@ const fmtPct = (n, d = 0) => (n * 100).toFixed(d) + "%";
 
 function Metric({ label, value, sub, accent, warn }) {
   return (
-    <div style={{ background: warn ? "rgba(248,113,113,0.06)" : "rgba(255,255,255,0.02)", border: `1px solid ${warn ? "rgba(248,113,113,0.15)" : "rgba(255,255,255,0.05)"}`, borderRadius: 8, padding: "10px 12px", flex: "1 1 150px", minWidth: 150 }}>
+    <div style={{ background: warn ? "rgba(248,113,113,0.1)" : "rgba(255,255,255,0.06)", border: `1px solid ${warn ? "rgba(248,113,113,0.28)" : "rgba(255,255,255,0.11)"}`, borderRadius: 8, padding: "10px 12px", flex: "1 1 150px", minWidth: 150 }}>
       <div style={{ fontSize: 10, color: warn ? "rgba(248,113,113,0.7)" : "rgba(255,255,255,0.35)", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 2, fontFamily: F }}>{label}</div>
       <div style={{ fontSize: 22, fontWeight: 700, color: accent || "#e2e8f0", fontFamily: F, letterSpacing: "-0.03em", lineHeight: 1.1 }}>{value}</div>
       {sub && <div style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 2, fontFamily: F }}>{sub}</div>}
@@ -2266,7 +2259,7 @@ function Select({ label, value, onChange, options, hint }) {
 }
 function Section({ title, children, style: s }) {
   return (
-    <div style={{ background: "rgba(255,255,255,0.015)", borderRadius: 8, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.04)", ...s }}>
+    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.1)", ...s }}>
       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10, fontFamily: F, fontWeight: 600 }}>{title}</div>
       {children}
     </div>
@@ -2471,6 +2464,18 @@ function App() {
   const baseIdx = useMemo(() => baselineIdx(baseline, COHORT_MONTHS), [baseline]);
   const [pricing, setPricing] = useBookStore(PRICING_STORE);
   const cohortAgg = useMemo(() => cohortSeries(cohorts, COHORT_MONTHS, baseIdx, pricing), [cohorts, baseIdx, pricing]);
+  // ── Cohort series for ALL three scenarios (for the summary chart overlays).
+  // The active scenario's live edits sit in `cohorts`; the other two live in
+  // SCENARIO_COHORTS which is only re-synced on scenario toggle. So we source
+  // the active scenario from `cohorts` and the inactive ones from the map.
+  const scenarioSeries = useMemo(() => {
+    const out = {};
+    for (const s of ["weak", "base", "strong"]) {
+      const src = s === scenario ? cohorts : SCENARIO_COHORTS[s];
+      out[s] = src ? cohortSeries(src, COHORT_MONTHS, baseIdx, pricing) : null;
+    }
+    return out;
+  }, [cohorts, scenario, baseIdx, pricing]);
   // Collapsible panels: keys "seg-{id}" and "leaf-{id}"; start with region
   // leaves collapsed beyond the first segment so the table opens readable.
   const [collapsed, setCollapsed] = useState(() => new Set(["seg-2","seg-3","leaf-12","leaf-13","leaf-21","leaf-22","leaf-23","leaf-24","leaf-31","leaf-32","leaf-33","leaf-34"]));
@@ -2547,6 +2552,9 @@ function App() {
   }, [supply, dAgg, normMode]);
 
   // ── Monthly supply-vs-demand curve (next 12 months, H100e) ──
+  //   Base scenario is shown as the stacked demand bar; weak/strong totals
+  //   are overlaid as dashed lines so the fan of scenarios is visible against
+  //   the same supply bar.
   const monthly = useMemo(() => {
     const rsv = supply.filter(r => r.status === "active");
     const rows = demand.filter(r => inclPipeline || r.status === "committed");
@@ -2554,19 +2562,14 @@ function App() {
     const lbl = i => { const mo = (now.getMonth() + i) % 12 + 1; const yr = (now.getFullYear() + Math.floor((now.getMonth() + i) / 12)) % 100; return `${mo}/${String(yr).padStart(2, "0")}`; };
     return Array.from({ length: 12 }, (_, i) => {
       const m = i + 1;
-      // supply available in month m: reserved with remMo>=m, plus on-demand/spot (always available)
       const sup = rsv.reduce((s, r) => s + ((r.structure !== "reserved" || r.remMo >= m) ? h100eOf(r.gpu, r.gpus, normMode) * liveFracOf(r, m) : 0), 0);
-      // demand from the cohort build — identical to what Projections reads
-      let demTrain = cohortAgg.train[i] || 0, demInf = cohortAgg.inf[i] || 0;
-      for (const r of []) {
-        if (i >= r.startMo && i < r.startMo + r.durationMo) {
-          const h = h100eOf(r.gpu, r.gpus, normMode);
-          if (r.kind === "training") demTrain += h; else demInf += h;
-        }
-      }
-      return { label: lbl(i), sup, dem: demTrain + demInf, demTrain, demInf };
+      const demTrain = cohortAgg.train[i] || 0, demInf = cohortAgg.inf[i] || 0;
+      const demWeak = ((scenarioSeries.weak?.train?.[i] || 0) + (scenarioSeries.weak?.inf?.[i] || 0));
+      const demBase = ((scenarioSeries.base?.train?.[i] || 0) + (scenarioSeries.base?.inf?.[i] || 0));
+      const demStrong = ((scenarioSeries.strong?.train?.[i] || 0) + (scenarioSeries.strong?.inf?.[i] || 0));
+      return { label: lbl(i), sup, dem: demTrain + demInf, demTrain, demInf, demWeak, demBase, demStrong };
     });
-  }, [supply, demand, inclPipeline, normMode]);
+  }, [supply, cohortAgg, scenarioSeries, normMode]);
 
   // ── Supply vs demand by region (delivered supply, active) ──
   // Region reconciliation: both demand (cohort) and supply now use the same
@@ -2574,12 +2577,27 @@ function App() {
   // buckets (Nordics → EU, Global/mixed → its own line) so the two sides align.
   const macroRegion = rg => rg === "Nordics" ? "EU" : rg;
   const byRegion = useMemo(() => {
-    const sMap = {}, dMap = {};
+    const sMap = {}, dBase = {}, dWeak = {}, dStrong = {};
     for (const r of supply.filter(r => r.status === "active")) { const mr = macroRegion(r.region); sMap[mr] = (sMap[mr] || 0) + h100eOf(r.gpu, r.gpus, normMode) * liveFracOf(r, 1); }
-    Object.entries(cohortAgg.perReg).forEach(([rg, ser]) => { const mr = macroRegion(rg); dMap[mr] = (dMap[mr] || 0) + (ser.inf[0] || 0) + (ser.train[0] || 0); });
-    const regions = Array.from(new Set([...Object.keys(sMap), ...Object.keys(dMap)])).filter(rg => (sMap[rg] || 0) > 0.5 || (dMap[rg] || 0) > 0.5);
-    return regions.map(rg => ({ region: rg, sup: sMap[rg] || 0, dem: dMap[rg] || 0, gap: (sMap[rg] || 0) - (dMap[rg] || 0) }));
-  }, [supply, cohortAgg, normMode]);
+    const fillFromSeries = (map, ser) => {
+      if (!ser) return;
+      Object.entries(ser.perReg).forEach(([rg, s]) => { const mr = macroRegion(rg); map[mr] = (map[mr] || 0) + (s.inf[0] || 0) + (s.train[0] || 0); });
+    };
+    fillFromSeries(dBase, scenarioSeries.base);
+    fillFromSeries(dWeak, scenarioSeries.weak);
+    fillFromSeries(dStrong, scenarioSeries.strong);
+    const regions = Array.from(new Set([...Object.keys(sMap), ...Object.keys(dBase), ...Object.keys(dWeak), ...Object.keys(dStrong)]))
+      .filter(rg => (sMap[rg] || 0) > 0.5 || (dBase[rg] || 0) > 0.5 || (dWeak[rg] || 0) > 0.5 || (dStrong[rg] || 0) > 0.5);
+    return regions.map(rg => ({
+      region: rg,
+      sup: sMap[rg] || 0,
+      dem: dBase[rg] || 0,
+      demWeak: dWeak[rg] || 0,
+      demBase: dBase[rg] || 0,
+      demStrong: dStrong[rg] || 0,
+      gap: (sMap[rg] || 0) - (dBase[rg] || 0),
+    }));
+  }, [supply, scenarioSeries, normMode]);
 
   // ── Serveable supply per model (VRAM + fabric fit on delivered clusters) ──
   // For each open model, how much of the fleet can actually host it: sum the
@@ -2608,7 +2626,7 @@ function App() {
   // ── Inference run sizing ──
   const irun = useMemo(() => sizeInferenceRun({ modelKey: iModel, bytesPerParam: iQuant, avgIn: iIn, avgOut: iOut, targetRPS: iRPS, eff: iEff / 100, tpotMs: iTpot }), [iModel, iQuant, iIn, iOut, iRPS, iEff, iTpot]);
   const best = irun.best;
-  const maxMonthly = Math.max(...monthly.map(m => Math.max(m.sup, m.dem)), 1);
+  const maxMonthly = Math.max(...monthly.map(m => Math.max(m.sup, m.dem, m.demWeak, m.demBase, m.demStrong)), 1);
 
   return (
     <div style={{ minHeight: "100vh", background: "#0b1118", color: "#e2e8f0", fontFamily: F, padding: "18px 20px 40px" }}>
@@ -2621,7 +2639,7 @@ function App() {
           </div>
         </div>
 
-        <SectionHeader title="Demand Assumptions" right={
+        <SectionHeader title="Demand Scenarios" right={
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <div style={{ display: "flex", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 6, overflow: "hidden" }}>
               {Object.entries(DEMAND_SCENARIO_DEFS).map(([k, d]) => (
@@ -2667,7 +2685,7 @@ function App() {
         } />
 
         {/* Scenario descriptions — what each toggle position assumes and why */}
-        <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.45)", lineHeight: 1.6, marginBottom: 12, padding: "10px 12px", background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8 }}>
+        <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.45)", lineHeight: 1.6, marginBottom: 12, padding: "10px 12px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 8 }}>
           <div style={{ marginBottom: 4 }}>
             <span style={{ color: "#f87171", fontWeight: 700 }}>WEAK — capex digestion.</span> Enterprise AI budgets hit CFO scrutiny: net adds stall, churn ticks up as marginal training runs consolidate onto hyperscaler credits. The startup funding window closes, lifting failure rates; the individual tier decays toward free and serverless endpoints. Frontier efficiency gains get captured as cost savings rather than more usage, so per-customer footprints lag the workload baselines (flex cut deeply negative).
           </div>
@@ -2681,6 +2699,124 @@ function App() {
             Each scenario diverges on two axes: (1) starting book — segment-level custBase multipliers scale today's customer count (enterprise stickiest, individuals most volatile) so month-1 demand and run-rate revenue reflect the scenario; (2) trajectory — net adds, churn, and baseline flex determine how the book compounds. Every assumption below stays editable; each scenario keeps its own copy of the build, so edits survive toggling away and back.
           </div>
         </div>
+
+        {/* ═════════════════════════════════════════════════════════════════════
+            SUMMARY STATS — moved to the top of the tab so the reconciliation
+            of the demand build against the supply book is the first thing
+            visible after the scenario framing. Charts show all three scenarios
+            (weak/base/strong) so the fan of outcomes is visible against the
+            same supply bar rather than requiring the user to toggle.
+            ═════════════════════════════════════════════════════════════════════ */}
+        <SectionHeader title="Summary Stats" />
+
+        {/* Balance headline */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+          <Metric label="Demand (H100e)" value={fmtBig(Math.round(bal.demNowH))} sub={`from cohort build · ${fmtBig(dAgg.trainH)} train / ${fmtBig(dAgg.infH)} inf`} accent={CY} />
+          <Metric label="Supply (H100e)" value={fmtBig(Math.round(bal.supH))} sub={bal.supHContracted - bal.supH > 0.5 ? `delivered today · ${fmtBig(Math.round(bal.supHContracted))} contracted incl. ramps` : "active fleet, all structures"} />
+          <Metric label="Fleet utilization" value={fmtPct(bal.util)} sub={bal.shortH > 0 ? `this month · ${fmtBig(Math.round(bal.shortH))} H100e SHORT` : `this month · ${fmtBig(Math.round(bal.freeH))} H100e idle`} accent={bal.util > 1 ? "#f87171" : bal.util > 0.85 ? "#6ee7b7" : "#fbbf24"} warn={bal.util > 1} />
+          <Metric label="Inference revenue run-rate" value={fmtUSD(dAgg.mrr)} sub={`${fmtBig(dAgg.infH)} H100e × ${fmtUSD(pricing.infPrice, 2)}/hr`} />
+          <Metric label="Training revenue run-rate" value={fmtUSD(dAgg.trainRunRate)} sub={`${fmtBig(dAgg.trainH)} H100e × ${fmtUSD(pricing.trainPrice, 2)}/hr`} />
+        </div>
+
+        {/* Monthly supply vs demand — base scenario stacked as bars; weak/strong
+            demand totals overlaid as dashed lines so the scenario fan is visible
+            against the same supply bar. */}
+        <Section title="Supply vs. demand by month (H100e) — is committed capacity covered across scenarios?" style={{ marginBottom: 12 }}>
+          <svg viewBox="0 0 900 200" style={{ width: "100%", height: "auto" }}>
+            {(() => {
+              const W = 900, H = 200, P = { t: 14, r: 10, b: 26, l: 44 };
+              const pw = W - P.l - P.r, ph = H - P.t - P.b;
+              const n = monthly.length, gap = pw / n, bw = gap * 0.34;
+              const y = v => P.t + ph - (v / maxMonthly) * ph;
+              const xc = i => P.l + gap * i + gap / 2;
+              const WEAK = "#f87171", BASE_L = "#67e8f9", STRONG = "#6ee7b7";
+              const linePoints = key => monthly.map((m, i) => `${(xc(i) + 1 + bw / 2).toFixed(1)},${y(m[key]).toFixed(1)}`).join(" ");
+              return <>
+                {[0, maxMonthly / 2, maxMonthly].map((v, i) => <g key={i}>
+                  <line x1={P.l} x2={W - P.r} y1={y(v)} y2={y(v)} stroke="rgba(255,255,255,0.05)" />
+                  <text x={P.l - 6} y={y(v) + 3} textAnchor="end" fontSize={8} fill="rgba(255,255,255,0.3)" fontFamily={F}>{fmtBig(Math.round(v))}</text>
+                </g>)}
+                {monthly.map((m, i) => {
+                  const cx = xc(i);
+                  const short = m.dem > m.sup;
+                  const baseY = P.t + ph;
+                  const infH = baseY - y(m.demInf);
+                  const trH = (baseY - y(m.dem)) - infH;
+                  return <g key={m.label}>
+                    <rect x={cx - bw - 1} y={y(m.sup)} width={bw} height={baseY - y(m.sup)} fill="#6ee7b7" opacity={0.55} rx={1}><title>{`${m.label} supply: ${fmtBig(Math.round(m.sup))} H100e`}</title></rect>
+                    <rect x={cx + 1} y={y(m.demInf)} width={bw} height={infH} fill={CY} opacity={0.75} rx={1}><title>{`${m.label} inference demand (base): ${fmtBig(Math.round(m.demInf))} H100e`}</title></rect>
+                    <rect x={cx + 1} y={y(m.dem)} width={bw} height={Math.max(trH, m.demTrain > 0 ? 1 : 0)} fill="#c4b5fd" opacity={0.8} rx={1}><title>{`${m.label} training demand (base): ${fmtBig(Math.round(m.demTrain))} H100e`}</title></rect>
+                    {short && <text x={cx + 1 + bw / 2} y={y(m.dem) - 2} textAnchor="middle" fontSize={7} fill="#f87171" fontFamily={F}>⚠</text>}
+                    <text x={cx} y={baseY + 11} textAnchor="middle" fontSize={7.5} fill={short ? "rgba(248,113,113,0.8)" : "rgba(255,255,255,0.35)"} fontFamily={F}>{m.label}</text>
+                  </g>;
+                })}
+                {/* Scenario overlay lines — weak & strong total demand */}
+                <polyline points={linePoints("demWeak")} fill="none" stroke={WEAK} strokeWidth={1.4} strokeDasharray="4 3" opacity={0.9} />
+                <polyline points={linePoints("demStrong")} fill="none" stroke={STRONG} strokeWidth={1.4} strokeDasharray="4 3" opacity={0.9} />
+                {monthly.map((m, i) => <g key={"sp" + i}>
+                  <circle cx={xc(i) + 1 + bw / 2} cy={y(m.demWeak)} r={1.8} fill={WEAK}><title>{`${m.label} WEAK demand: ${fmtBig(Math.round(m.demWeak))} H100e`}</title></circle>
+                  <circle cx={xc(i) + 1 + bw / 2} cy={y(m.demStrong)} r={1.8} fill={STRONG}><title>{`${m.label} STRONG demand: ${fmtBig(Math.round(m.demStrong))} H100e`}</title></circle>
+                </g>)}
+                {/* Legend */}
+                <rect x={P.l} y={P.t} width={9} height={9} fill="#6ee7b7" opacity={0.55} /><text x={P.l + 13} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>supply</text>
+                <rect x={P.l + 58} y={P.t} width={9} height={9} fill={CY} opacity={0.75} /><text x={P.l + 71} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>inference (base)</text>
+                <rect x={P.l + 158} y={P.t} width={9} height={9} fill="#c4b5fd" opacity={0.8} /><text x={P.l + 171} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>training (base)</text>
+                <line x1={P.l + 250} x2={P.l + 265} y1={P.t + 4} y2={P.t + 4} stroke={WEAK} strokeWidth={1.4} strokeDasharray="4 3" /><text x={P.l + 269} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>weak total</text>
+                <line x1={P.l + 335} x2={P.l + 350} y1={P.t + 4} y2={P.t + 4} stroke={STRONG} strokeWidth={1.4} strokeDasharray="4 3" /><text x={P.l + 354} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>strong total</text>
+              </>;
+            })()}
+          </svg>
+          <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", marginTop: 4 }}>
+            Paired bars per month: available supply (reserved still under contract, scaled by delivery ramp, + on-demand/spot) vs. base-scenario demand (training + inference stacked). Dashed lines are total demand under the <span style={{ color: "#f87171" }}>weak</span> and <span style={{ color: "#6ee7b7" }}>strong</span> scenarios — the fan of possible demand paths against the same supply. A red ⚠ marks a month where base demand exceeds supply.
+          </div>
+        </Section>
+
+        {/* Reconciliation by region — scenario range shown as tick marks around
+            the base bar. */}
+        <Section title="Supply vs. demand by region (H100e) — coverage across scenarios" style={{ marginBottom: 12 }}>
+          <svg viewBox="0 0 900 200" style={{ width: "100%", height: "auto" }}>
+            {(() => {
+              const W = 900, H = 200, P = { t: 14, r: 10, b: 40, l: 44 };
+              const pw = W - P.l - P.r, ph = H - P.t - P.b;
+              const n = Math.max(byRegion.length, 1), gap = pw / n, bw = gap * 0.3;
+              const maxV = Math.max(...byRegion.map(r => Math.max(r.sup, r.demBase, r.demWeak, r.demStrong)), 1);
+              const y = v => P.t + ph - (v / maxV) * ph;
+              const WEAK = "#f87171", STRONG = "#6ee7b7";
+              return <>
+                {[0, maxV / 2, maxV].map((v, i) => <g key={i}>
+                  <line x1={P.l} x2={W - P.r} y1={y(v)} y2={y(v)} stroke="rgba(255,255,255,0.05)" />
+                  <text x={P.l - 6} y={y(v) + 3} textAnchor="end" fontSize={8} fill="rgba(255,255,255,0.3)" fontFamily={F}>{fmtBig(Math.round(v))}</text>
+                </g>)}
+                {byRegion.map((r, i) => {
+                  const xc = P.l + gap * i + gap / 2;
+                  const short = r.demBase > r.sup;
+                  const dx0 = xc + 1, dx1 = xc + 1 + bw;
+                  return <g key={r.region}>
+                    {/* Supply bar (left) */}
+                    <rect x={xc - bw - 1} y={y(r.sup)} width={bw} height={P.t + ph - y(r.sup)} fill="#6ee7b7" opacity={0.55} rx={1}><title>{`${r.region} supply: ${fmtBig(Math.round(r.sup))} H100e`}</title></rect>
+                    {/* Base demand bar (right) */}
+                    <rect x={dx0} y={y(r.demBase)} width={bw} height={P.t + ph - y(r.demBase)} fill={short ? "#f87171" : CY} opacity={0.7} rx={1}><title>{`${r.region} demand (base): ${fmtBig(Math.round(r.demBase))} H100e`}</title></rect>
+                    {/* Weak & strong tick marks across the demand bar */}
+                    <line x1={dx0 - 2} x2={dx1 + 2} y1={y(r.demWeak)} y2={y(r.demWeak)} stroke={WEAK} strokeWidth={1.4} strokeDasharray="3 2"><title>{`${r.region} WEAK demand: ${fmtBig(Math.round(r.demWeak))} H100e`}</title></line>
+                    <line x1={dx0 - 2} x2={dx1 + 2} y1={y(r.demStrong)} y2={y(r.demStrong)} stroke={STRONG} strokeWidth={1.4} strokeDasharray="3 2"><title>{`${r.region} STRONG demand: ${fmtBig(Math.round(r.demStrong))} H100e`}</title></line>
+                    <text x={xc} y={P.t + ph + 11} textAnchor="middle" fontSize={7.5} fill={short ? "rgba(248,113,113,0.85)" : "rgba(255,255,255,0.4)"} fontFamily={F}>{r.region.replace("Global (mixed)", "Global")}</text>
+                    <text x={xc} y={P.t + ph + 21} textAnchor="middle" fontSize={7} fill={short ? "#f87171" : "rgba(255,255,255,0.25)"} fontFamily={F}>{r.gap >= 0 ? "+" : ""}{fmtBig(Math.round(r.gap))}</text>
+                  </g>;
+                })}
+                {/* Legend */}
+                <rect x={P.l} y={P.t} width={9} height={9} fill="#6ee7b7" opacity={0.55} /><text x={P.l + 13} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>supply</text>
+                <rect x={P.l + 58} y={P.t} width={9} height={9} fill={CY} opacity={0.7} /><text x={P.l + 71} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>demand (base)</text>
+                <line x1={P.l + 155} x2={P.l + 170} y1={P.t + 4} y2={P.t + 4} stroke={WEAK} strokeWidth={1.4} strokeDasharray="3 2" /><text x={P.l + 174} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>weak</text>
+                <line x1={P.l + 218} x2={P.l + 233} y1={P.t + 4} y2={P.t + 4} stroke={STRONG} strokeWidth={1.4} strokeDasharray="3 2" /><text x={P.l + 237} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>strong</text>
+              </>;
+            })()}
+          </svg>
+          <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", marginTop: 4, lineHeight: 1.5 }}>
+            Delivered supply vs. base-scenario demand per region (gap under each label). Dashed tick marks show the same region's demand under the <span style={{ color: "#f87171" }}>weak</span> and <span style={{ color: "#6ee7b7" }}>strong</span> scenarios — the vertical range across the demand bar is your scenario band. Tokens can't be served across a data-residency boundary, so a fleet that's balanced in aggregate can still be short where demand actually sits.
+          </div>
+        </Section>
+
+        <SectionHeader title="Demand Assumptions" />
 
         {/* ── Demand build: per-segment monthly drivers, months as columns (matches Projections) ── */}
         <Section title="Demand build — customer segments × regions, monthly drivers (feeds Projections)" style={{ marginBottom: 12 }}>
@@ -3094,90 +3230,6 @@ function App() {
         </Section>
 
 
-        <SectionHeader title="Summary Stats" />
-
-        {/* Balance headline */}
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
-          <Metric label="Demand (H100e)" value={fmtBig(Math.round(bal.demNowH))} sub={`from cohort build · ${fmtBig(dAgg.trainH)} train / ${fmtBig(dAgg.infH)} inf`} accent={CY} />
-          <Metric label="Supply (H100e)" value={fmtBig(Math.round(bal.supH))} sub={bal.supHContracted - bal.supH > 0.5 ? `delivered today · ${fmtBig(Math.round(bal.supHContracted))} contracted incl. ramps` : "active fleet, all structures"} />
-          <Metric label="Fleet utilization" value={fmtPct(bal.util)} sub={bal.shortH > 0 ? `this month · ${fmtBig(Math.round(bal.shortH))} H100e SHORT` : `this month · ${fmtBig(Math.round(bal.freeH))} H100e idle`} accent={bal.util > 1 ? "#f87171" : bal.util > 0.85 ? "#6ee7b7" : "#fbbf24"} warn={bal.util > 1} />
-          <Metric label="Inference revenue run-rate" value={fmtUSD(dAgg.mrr)} sub={`${fmtBig(dAgg.infH)} H100e × ${fmtUSD(pricing.infPrice, 2)}/hr`} />
-          <Metric label="Training revenue run-rate" value={fmtUSD(dAgg.trainRunRate)} sub={`${fmtBig(dAgg.trainH)} H100e × ${fmtUSD(pricing.trainPrice, 2)}/hr`} />
-        </div>
-
-        {/* Monthly supply vs demand */}
-        <Section title="Supply vs. demand by month (H100e) — is committed capacity covered?" style={{ marginBottom: 12 }}>
-          <svg viewBox="0 0 900 200" style={{ width: "100%", height: "auto" }}>
-            {(() => {
-              const W = 900, H = 200, P = { t: 14, r: 10, b: 26, l: 44 };
-              const pw = W - P.l - P.r, ph = H - P.t - P.b;
-              const n = monthly.length, gap = pw / n, bw = gap * 0.34;
-              const y = v => P.t + ph - (v / maxMonthly) * ph;
-              return <>
-                {[0, maxMonthly / 2, maxMonthly].map((v, i) => <g key={i}>
-                  <line x1={P.l} x2={W - P.r} y1={y(v)} y2={y(v)} stroke="rgba(255,255,255,0.05)" />
-                  <text x={P.l - 6} y={y(v) + 3} textAnchor="end" fontSize={8} fill="rgba(255,255,255,0.3)" fontFamily={F}>{fmtBig(Math.round(v))}</text>
-                </g>)}
-                {monthly.map((m, i) => {
-                  const xc = P.l + gap * i + gap / 2;
-                  const short = m.dem > m.sup;
-                  const baseY = P.t + ph;
-                  const infH = baseY - y(m.demInf);
-                  const trH = (baseY - y(m.dem)) - infH;
-                  return <g key={m.label}>
-                    <rect x={xc - bw - 1} y={y(m.sup)} width={bw} height={baseY - y(m.sup)} fill="#6ee7b7" opacity={0.55} rx={1}><title>{`${m.label} supply: ${fmtBig(Math.round(m.sup))} H100e`}</title></rect>
-                    <rect x={xc + 1} y={y(m.demInf)} width={bw} height={infH} fill={CY} opacity={0.75} rx={1}><title>{`${m.label} inference demand: ${fmtBig(Math.round(m.demInf))} H100e`}</title></rect>
-                    <rect x={xc + 1} y={y(m.dem)} width={bw} height={Math.max(trH, m.demTrain > 0 ? 1 : 0)} fill="#c4b5fd" opacity={0.8} rx={1}><title>{`${m.label} training demand: ${fmtBig(Math.round(m.demTrain))} H100e`}</title></rect>
-                    {short && <text x={xc + 1 + bw / 2} y={y(m.dem) - 2} textAnchor="middle" fontSize={7} fill="#f87171" fontFamily={F}>⚠</text>}
-                    <text x={xc} y={baseY + 11} textAnchor="middle" fontSize={7.5} fill={short ? "rgba(248,113,113,0.8)" : "rgba(255,255,255,0.35)"} fontFamily={F}>{m.label}</text>
-                  </g>;
-                })}
-                <rect x={P.l} y={P.t} width={9} height={9} fill="#6ee7b7" opacity={0.55} /><text x={P.l + 13} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>supply</text>
-                <rect x={P.l + 58} y={P.t} width={9} height={9} fill={CY} opacity={0.75} /><text x={P.l + 71} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>inference</text>
-                <rect x={P.l + 128} y={P.t} width={9} height={9} fill="#c4b5fd" opacity={0.8} /><text x={P.l + 141} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>training</text>
-              </>;
-            })()}
-          </svg>
-          <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", marginTop: 4 }}>
-            Paired bars per month: available supply (reserved still under contract, scaled by delivery ramp, + on-demand/spot) vs. scheduled demand. A red demand bar exceeds supply that month — capacity you've sold or plan to that you can't cover without sourcing more. Toggle pipeline demand above to see committed-only vs. full pipeline.
-          </div>
-        </Section>
-
-        {/* Reconciliation by GPU class */}
-        <Section title="Supply vs. demand by region (H100e) — can we serve tokens where they're needed?" style={{ marginBottom: 12 }}>
-          <svg viewBox="0 0 900 200" style={{ width: "100%", height: "auto" }}>
-            {(() => {
-              const W = 900, H = 200, P = { t: 14, r: 10, b: 40, l: 44 };
-              const pw = W - P.l - P.r, ph = H - P.t - P.b;
-              const n = Math.max(byRegion.length, 1), gap = pw / n, bw = gap * 0.3;
-              const maxV = Math.max(...byRegion.map(r => Math.max(r.sup, r.dem)), 1);
-              const y = v => P.t + ph - (v / maxV) * ph;
-              return <>
-                {[0, maxV / 2, maxV].map((v, i) => <g key={i}>
-                  <line x1={P.l} x2={W - P.r} y1={y(v)} y2={y(v)} stroke="rgba(255,255,255,0.05)" />
-                  <text x={P.l - 6} y={y(v) + 3} textAnchor="end" fontSize={8} fill="rgba(255,255,255,0.3)" fontFamily={F}>{fmtBig(Math.round(v))}</text>
-                </g>)}
-                {byRegion.map((r, i) => {
-                  const xc = P.l + gap * i + gap / 2;
-                  const short = r.dem > r.sup;
-                  return <g key={r.region}>
-                    <rect x={xc - bw - 1} y={y(r.sup)} width={bw} height={P.t + ph - y(r.sup)} fill="#6ee7b7" opacity={0.55} rx={1}><title>{`${r.region} supply: ${fmtBig(Math.round(r.sup))} H100e`}</title></rect>
-                    <rect x={xc + 1} y={y(r.dem)} width={bw} height={P.t + ph - y(r.dem)} fill={short ? "#f87171" : CY} opacity={0.7} rx={1}><title>{`${r.region} demand: ${fmtBig(Math.round(r.dem))} H100e`}</title></rect>
-                    <text x={xc} y={P.t + ph + 11} textAnchor="middle" fontSize={7.5} fill={short ? "rgba(248,113,113,0.85)" : "rgba(255,255,255,0.4)"} fontFamily={F}>{r.region.replace("Global (mixed)", "Global")}</text>
-                    <text x={xc} y={P.t + ph + 21} textAnchor="middle" fontSize={7} fill={short ? "#f87171" : "rgba(255,255,255,0.25)"} fontFamily={F}>{r.gap >= 0 ? "+" : ""}{fmtBig(Math.round(r.gap))}</text>
-                  </g>;
-                })}
-                <rect x={P.l} y={P.t} width={9} height={9} fill="#6ee7b7" opacity={0.55} /><text x={P.l + 13} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>supply</text>
-                <rect x={P.l + 58} y={P.t} width={9} height={9} fill={CY} opacity={0.7} /><text x={P.l + 71} y={P.t + 8} fontSize={8.5} fill="rgba(255,255,255,0.5)" fontFamily={F}>demand</text>
-              </>;
-            })()}
-          </svg>
-          <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", marginTop: 4, lineHeight: 1.5 }}>
-            Delivered supply vs. booked demand per region (gap under each label). Tokens can't be served across a data-residency or latency boundary, so a fleet that's balanced in aggregate can still be short where demand actually sits — a red region needs local sourcing even if another region shows idle GPUs. This is the geography axis of the same match the class table shows.
-          </div>
-        </Section>
-
-
         <div style={{ fontSize: 9, color: "rgba(255,255,255,0.18)", marginTop: 16, fontFamily: F, lineHeight: 1.5 }}>
           Demand book and supply book share one data layer — edits here and on the Compute Supply tab reconcile live. Training-run FLOPs use the 6ND approximation (excludes activation recomputation and specifics of parallelism); MFU (training) and serving efficiency (inference) are the assumptions to pressure-test, alongside market prices. Inference throughput is a decode-bound roofline upper bound. H100e uses FLOP-normalization to match the supply tab.
         </div>
@@ -3490,7 +3542,7 @@ function Select({ label, value, onChange, options }) {
 }
 function Section({ title, children, style: s }) {
   return (
-    <div style={{ background: "rgba(255,255,255,0.015)", borderRadius: 8, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.04)", ...s }}>
+    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.1)", ...s }}>
       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10, fontFamily: F, fontWeight: 600 }}>{title}</div>
       {children}
     </div>
@@ -3682,7 +3734,7 @@ function App() {
         <Section title="New-entrant diligence checklist — before any first commitment" style={{ marginBottom: 12 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 10 }}>
             {ENTRANT_CHECKLIST.map(st => (
-              <div key={st.stage} style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 6, padding: "8px 10px" }}>
+              <div key={st.stage} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 6, padding: "8px 10px" }}>
                 <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.55)", fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase", marginBottom: 6, fontFamily: F }}>{st.stage}</div>
                 {st.items.map((it, i) => (
                   <div key={i} style={{ display: "flex", gap: 6, fontSize: 9.5, color: "rgba(255,255,255,0.5)", lineHeight: 1.45, marginBottom: 4, fontFamily: F }}>
@@ -3970,7 +4022,7 @@ function computeMonth(demandRows, m, byClassSupply) {
 
 function Metric({ label, value, sub, accent, warn }) {
   return (
-    <div style={{ background: warn ? "rgba(248,113,113,0.06)" : "rgba(255,255,255,0.02)", border: `1px solid ${warn ? "rgba(248,113,113,0.15)" : "rgba(255,255,255,0.05)"}`, borderRadius: 8, padding: "10px 12px", flex: "1 1 150px", minWidth: 150 }}>
+    <div style={{ background: warn ? "rgba(248,113,113,0.1)" : "rgba(255,255,255,0.06)", border: `1px solid ${warn ? "rgba(248,113,113,0.28)" : "rgba(255,255,255,0.11)"}`, borderRadius: 8, padding: "10px 12px", flex: "1 1 150px", minWidth: 150 }}>
       <div style={{ fontSize: 10, color: warn ? "rgba(248,113,113,0.7)" : "rgba(255,255,255,0.35)", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 2, fontFamily: F }}>{label}</div>
       <div style={{ fontSize: 21, fontWeight: 700, color: accent || "#e2e8f0", fontFamily: F, letterSpacing: "-0.03em", lineHeight: 1.1 }}>{value}</div>
       {sub && <div style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 2, fontFamily: F }}>{sub}</div>}
@@ -3993,7 +4045,7 @@ function Slider({ label, value, onChange, min, max, step = 1, fmtFn, hint }) {
 }
 function Section({ title, children, style: s }) {
   return (
-    <div style={{ background: "rgba(255,255,255,0.015)", borderRadius: 8, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.04)", ...s }}>
+    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.1)", ...s }}>
       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10, fontFamily: F, fontWeight: 600 }}>{title}</div>
       {children}
     </div>
@@ -4598,95 +4650,157 @@ const TAB_F = "'IBM Plex Mono', 'JetBrains Mono', monospace";
 function InstructionsApp() {
   const F = TAB_F;
   const CYAN = "#67e8f9";
-  const tabDocs = [
+  const GRW = "#86efac";
+  const AMB = "#fbbf24";
+  const VIO = "#c4b5fd";
+  const RO  = "#f87171";
+  const MUT = "rgba(255,255,255,0.55)";
+
+  // Ordered pipeline: each node is one analytical step. `tabs` names the
+  // dashboard tab(s) that answer it. `question` is the plain-English decision
+  // the step tackles; `answer` is a one-liner on how the tab addresses it.
+  const steps = [
     {
-      name: "Projections",
-      bullets: [
-        "Summary statistics from demand and supply engines over a 24-month horizon. Compute supply/demand and financials (revenues, COGS, free cash flow, segment economics) are detailed across weak/base/strong scenarios.",
-      ],
+      n: "01",
+      title: "Forecast Compute Demand",
+      tabs: ["Compute Demand"],
+      color: GRW,
+      question: "How much compute will we need — and when, where, for what?",
+      answer: "Bottom-up 24-month build over customer cohorts, regions, and training/inference workloads. Weak/base/strong scenarios flex new-logo growth, up-sell, and churn; price elasticity feeds back into demanded volume.",
     },
     {
-      name: "Compute Demand",
-      bullets: [
-        "Detailed bottom-up 24-month demand build with weak/base/strong scenarios. Models customer-type cohorts, regions, training/inference workloads, new-logo growth, up-sell, and churn.",
-        "More detailed training and inference modelers consider variables like LLM parameter counts, training tokens/time, MFU, input/output tokens, and serving efficiency.",
-        "Incorporates demand elasticity to price charged for training/inference.",
-      ],
+      n: "02",
+      title: "Inventory Existing Supply",
+      tabs: ["Compute Supply"],
+      color: CYAN,
+      question: "What compute do we already own or have on contract?",
+      answer: "Live supply book with coverage cuts by region, provider, GPU type, contract structure, model-serving ability, and workload type. Establishes the baseline the demand forecast is compared against.",
     },
     {
-      name: "Compute Supply",
-      bullets: [
-        "Keeps track of existing compute supply and provides summary statistics detailing coverage by region, provider, GPU type, contract type, model serving ability, and training/inference workload type.",
-        "Based on forecasted compute demand and existing compute supply, the Supply Filling Engine identifies gaps in coverage across chip, fabric, region, customer type, and workload based on a 6-part scheme:",
-        {
-          sub: [
-            "Category-by-category supply/demand mismatch analysis.",
-            "Capability cascades/substitution for idle capacity.",
-            "Fractile rules measuring loss-if-idle (considers salvage value of unused GPUs) and save-if-used (considers on-demand/spot rates) ratios against projected demand scenarios to determine optimal type/quantity/timing of GPUs to purchase.",
-            "Identify optimal vendor to source GPUs from based on individual vendor specs, pricing, and expected value.",
-            "A gating/guardrail mechanism to ensure portfolio risks are contained (e.g., vendor concentration, cash prepayment limits, low-quality data center purchase limits).",
-            "A final expected profit function that must be maximized given the prior constraints.",
-          ],
-        },
-      ],
+      n: "03",
+      title: "Identify Supply Gaps",
+      tabs: ["Compute Supply", "→ Supply Filling Engine"],
+      color: CYAN,
+      question: "Where does supply fall short of demand — and by how much?",
+      answer: "Supply Filling Engine diffs projected demand against the existing book across chip / fabric / region / customer / workload, then surfaces the shortfall (and any idle capacity that could be re-cascaded to cover it).",
     },
     {
-      name: "Vendor Spec",
-      bullets: [
-        "Sources GPU availability from different vendors, with detailed GPU type, configuration, scale-up/scale-out fabric, and pricing. Allows for easy comparison of hardware specs.",
-        "Estimates a \"fair\" price to pay for each GPU spec based on a sign-constrained ridge regression.",
-        "An 8-part vendor diligence framework is included as a reference guide when evaluating new providers.",
-      ],
+      n: "04",
+      title: "Vet Vendors & Price Hardware",
+      tabs: ["Vendor Spec"],
+      color: AMB,
+      question: "Who do we buy from, and what is a fair price for each GPU spec?",
+      answer: "Cross-check vendor catalogs (GPU type, fabric, config, price), fit a sign-constrained ridge regression for a \"fair\" price benchmark, and score prospective vendors against an 8-part diligence framework.",
     },
     {
-      name: "Future Supply",
-      bullets: [
-        "Answers the old-gen vs. new-gen upgrade timing question: given a planning horizon and rate cards for current-gen hardware, when (if ever) is it optimal to switch to the next generation?",
-        "Prices every valid \"bridge n years on current gen, then switch\" strategy under a two-regime price path (scarcity inflation → normalization decay) and a maturity-ramped goodput speedup — the enumerated PV(n) reveals the optimal bridge length.",
-        "Inverts the problem into break-even Λ*(n) — the next-gen effective unit cost that would tie each bridge with never-switching, expressed only in prices you can quote today (no forecasts on the right-hand side).",
-        "Includes a full 12-step derivation of the underlying equations, from the physical work-throughput identity through the practical inverted form.",
-      ],
+      n: "05",
+      title: "Optimize the Purchase Plan",
+      tabs: ["Compute Supply", "→ Supply Filling Engine"],
+      color: CYAN,
+      question: "Which GPUs, how many, from which vendors — under what risk limits?",
+      answer: "Supply Filling Engine's optimization pass maximizes expected profit subject to portfolio guardrails (vendor concentration, cash-prepay caps, DC-tier limits). Emits a ranked buy list with quantity, vendor, and timing.",
+    },
+    {
+      n: "06",
+      title: "Time the Generation Switch",
+      tabs: ["Future Supply"],
+      color: VIO,
+      question: "Buy long-term on current-gen now, or bridge short-term until next-gen chips land?",
+      answer: "Prices every \"bridge n years on current-gen, then switch\" strategy under a two-regime price path and maturity-ramped speedup. Inverts to break-even Λ*(n) — the next-gen unit cost that would justify each bridge length, expressed in prices you can quote today.",
     },
   ];
+
+  const Arrow = () => (
+    <div style={{ display: "flex", justifyContent: "center", padding: "6px 0" }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+        <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.18)" }} />
+        <div style={{ color: "rgba(255,255,255,0.35)", fontSize: 14, lineHeight: 1, marginTop: -2 }}>▼</div>
+      </div>
+    </div>
+  );
+
   return (
     <div style={{ background: "#0b1118", color: "#e2e8f0", minHeight: "calc(100vh - 60px)", padding: "28px 32px", fontFamily: F }}>
       <div style={{ maxWidth: 920, margin: "0 auto" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 6 }}>
           <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em", color: "#e2e8f0" }}>Instructions</div>
-          <div style={{ fontSize: 11, color: CYAN, letterSpacing: "0.08em" }}>— dashboard overview</div>
+          <div style={{ fontSize: 11, color: CYAN, letterSpacing: "0.08em" }}>— procurement workflow</div>
         </div>
         <div style={{ height: 1, background: "rgba(255,255,255,0.07)", marginBottom: 18 }} />
 
-        <div style={{ fontSize: 13, lineHeight: 1.65, color: "#cbd5e1", marginBottom: 24 }}>
-          A comprehensive dashboard for managing GPU compute supply and demand. A bottom-up demand build, existing compute supply book, and vendor specs are fed into a multi-step supply procurement optimizer (Supply Filling Engine) to maximize expected profits.
+        <div style={{ fontSize: 13, lineHeight: 1.65, color: "#cbd5e1", marginBottom: 22 }}>
+          The dashboard tabs are laid out to follow one end-to-end question: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>how much compute should we buy, of what kind, from whom, and when?</span> Each step below is one link in that chain — the flow feeds forward into the next.
         </div>
 
-        <div style={{ fontSize: 13, fontWeight: 700, color: CYAN, letterSpacing: "0.08em", marginBottom: 10 }}>TABS</div>
-
-        {tabDocs.map((t, i) => (
-          <div key={t.name} style={{
-            border: "1px solid rgba(255,255,255,0.07)",
-            borderRadius: 4,
-            padding: "14px 16px",
-            marginBottom: 10,
-            background: "rgba(255,255,255,0.015)",
-          }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", letterSpacing: "-0.01em", marginBottom: 8 }}>
-              <span style={{ color: CYAN, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>{t.name}
+        {/* ── Flow diagram ─────────────────────────────────────────────────── */}
+        {steps.map((s, i) => (
+          <React.Fragment key={s.n}>
+            <div style={{
+              border: `1px solid ${s.color}55`,
+              borderLeft: `3px solid ${s.color}`,
+              borderRadius: 6,
+              padding: "14px 18px",
+              background: "rgba(255,255,255,0.06)",
+              display: "grid",
+              gridTemplateColumns: "48px 1fr",
+              gap: 14,
+              alignItems: "start",
+            }}>
+              <div style={{
+                fontSize: 22, fontWeight: 700, color: s.color, letterSpacing: "-0.03em",
+                lineHeight: 1, paddingTop: 2, fontFamily: F,
+              }}>{s.n}</div>
+              <div>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0", letterSpacing: "-0.01em" }}>{s.title}</div>
+                  <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                    tab: {s.tabs.map((t, k) => (
+                      <span key={k} style={{ color: s.color, marginLeft: k === 0 ? 4 : 4 }}>{t}</span>
+                    ))}
+                  </div>
+                </div>
+                <div style={{
+                  fontSize: 12, fontStyle: "italic", color: s.color,
+                  marginBottom: 6, lineHeight: 1.5,
+                }}>“{s.question}”</div>
+                <div style={{ fontSize: 12, lineHeight: 1.6, color: "#cbd5e1" }}>{s.answer}</div>
+              </div>
             </div>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.6, color: "#cbd5e1" }}>
-              {t.bullets.map((b, j) => (
-                typeof b === "string"
-                  ? <li key={j} style={{ marginBottom: 4 }}>{b}</li>
-                  : (
-                    <ul key={j} style={{ margin: "6px 0 4px", paddingLeft: 18, listStyleType: "circle" }}>
-                      {b.sub.map((s, k) => <li key={k} style={{ marginBottom: 4 }}>{s}</li>)}
-                    </ul>
-                  )
-              ))}
-            </ul>
-          </div>
+            {i < steps.length - 1 && <Arrow />}
+          </React.Fragment>
         ))}
+
+        {/* ── Terminal node: Projections is the summary read-out ──────────── */}
+        <div style={{ display: "flex", justifyContent: "center", padding: "10px 0 6px" }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+            <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.18)" }} />
+            <div style={{ fontSize: 9, color: MUT, letterSpacing: "0.1em", marginTop: 2 }}>ROLLS UP INTO</div>
+            <div style={{ width: 1, height: 6, background: "rgba(255,255,255,0.18)" }} />
+            <div style={{ color: "rgba(255,255,255,0.35)", fontSize: 14, lineHeight: 1 }}>▼</div>
+          </div>
+        </div>
+        <div style={{
+          border: `1px dashed ${RO}88`,
+          borderRadius: 6,
+          padding: "14px 18px",
+          background: "rgba(248,113,113,0.08)",
+          display: "grid",
+          gridTemplateColumns: "48px 1fr",
+          gap: 14,
+          alignItems: "start",
+        }}>
+          <div style={{ fontSize: 22, fontWeight: 700, color: RO, letterSpacing: "-0.03em", lineHeight: 1, paddingTop: 2, fontFamily: F }}>Σ</div>
+          <div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0", letterSpacing: "-0.01em" }}>Projections</div>
+              <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.08em", textTransform: "uppercase" }}>tab: <span style={{ color: RO, marginLeft: 4 }}>Projections</span></div>
+            </div>
+            <div style={{ fontSize: 12, fontStyle: "italic", color: RO, marginBottom: 6, lineHeight: 1.5 }}>“What does the whole plan look like in dollars?”</div>
+            <div style={{ fontSize: 12, lineHeight: 1.6, color: "#cbd5e1" }}>
+              Summary read-out of the demand and supply engines over the 24-month horizon: matched supply/demand, revenues, COGS, free cash flow, and segment economics under weak/base/strong scenarios.
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -4847,7 +4961,7 @@ function resolveCurrentSpec(key, supply) {
 function TemporalInpBox({ label, value, onChange, min, max, step = 1, fmt, hint, color, mut, font }) {
   const fmtFn = fmt || (v => v);
   return (
-    <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 6, padding: "10px 12px" }}>
+    <div style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 6, padding: "10px 12px" }}>
       <div style={{ fontSize: 10, color: mut, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4, fontFamily: font }}>{label}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} style={{ flex: 1, accentColor: color, height: 3 }} />
@@ -5117,14 +5231,14 @@ function TemporalApp() {
   ), []);
   const InpBox = React.useMemo(() => (p) => <TemporalInpBox {...p} color={VIO} mut={MUT} font={F} />, []);
   const Kpi = React.useMemo(() => ({ label, value, sub, accent }) => (
-    <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 14px", minWidth: 150 }}>
+    <div style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 8, padding: "12px 14px", minWidth: 150 }}>
       <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 3, fontFamily: F }}>{label}</div>
       <div style={{ fontSize: 18, fontWeight: 700, color: accent || "#e2e8f0", fontFamily: F, letterSpacing: "-0.02em", lineHeight: 1.15 }}>{value}</div>
       {sub && <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3, fontFamily: F, lineHeight: 1.4 }}>{sub}</div>}
     </div>
   ), []);
   const Sec = React.useMemo(() => ({ title, children, style }) => (
-    <div style={{ background: "rgba(255,255,255,0.015)", borderRadius: 8, padding: "14px 16px", border: "1px solid rgba(255,255,255,0.05)", marginBottom: 14, ...style }}>
+    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "14px 16px", border: "1px solid rgba(255,255,255,0.1)", marginBottom: 14, ...style }}>
       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10, fontFamily: F, fontWeight: 600 }}>{title}</div>
       {children}
     </div>
@@ -5546,6 +5660,60 @@ function TemporalApp() {
           </div>
         </div>
 
+        <H title="Result — optimal bridge length" />
+
+        <Sec title={`PV of total cost by bridge length — ${currentGpu === "PORTFOLIO_AVG" ? "Portfolio blend" : (HARDWARE_CATALOG[currentGpu]?.label || currentGpu)} → ${HARDWARE_CATALOG[nextGenId]?.label || nextGenId} (per unit of work)`}>
+          {pvChart}
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 4, lineHeight: 1.5 }}>
+            Each bar is one bridge choice: run current-gen for <b>n</b> years then switch to next-gen for the remaining <b>N−n</b> years, PV'd back to today. Optimal <b>n*</b> highlighted in violet. If PV is monotone increasing → never switch; if monotone decreasing → switch as early as possible; if U-shaped → interior optimum. Current-gen rate for shorter contracts scales up per the <b>{fmtPc(termDiscount, 1)}/yr</b> contract length discount (a shorter contract gives back years of the discount).
+          </div>
+        </Sec>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+          <Sec title="A. Contract prices — P_next(t) vs. P_curr(N) anchor" style={{ marginBottom: 0 }}>
+            {priceChart}
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 4, lineHeight: 1.5 }}>
+              Raw quoted rates. <span style={{ color: AMB }}>P<sub>next</sub>(t)</span> is two-regime — inflates at {fmtPc(inflationRate, 0)}/yr from launch through t<sup>★</sup>={fmtY(tNorm, 1)}, then decays at {fmtPc(decayRate, 0)}/yr. The <span style={{ color: AMB }}>P<sub>curr</sub>(N)</span> dashed line is the current-gen full-horizon lock we're comparing against. Where the trajectory crosses under the dashed line = when next-gen becomes cheaper per contracted GPU-hour (before adjusting for speedup).
+            </div>
+          </Sec>
+          <Sec title="B. Effective unit cost Λ(t) vs. P_curr(N) anchor" style={{ marginBottom: 0 }}>
+            {unitCostChart}
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 4, lineHeight: 1.5 }}>
+              Speedup-adjusted. <span style={{ color: RO }}>Λ(t) = P<sub>next</sub>(t) / σ(t)</span> is what next-gen actually costs per unit of work — speedup already baked in via σ(t) rising from {fmtPc(maturityInit, 0)} of σ<sub>∞</sub> at launch to 100% over {fmtY(maturityYears, 1)}. Where Λ crosses under the <span style={{ color: AMB }}>P<sub>curr</sub>(N)</span> anchor is when next-gen wins per unit of work delivered — the actionable moment.
+            </div>
+          </Sec>
+        </div>
+
+        <div style={{ padding: "10px 14px", background: "rgba(251,191,36,0.05)", border: "1px solid rgba(251,191,36,0.15)", borderRadius: 4, color: "rgba(255,255,255,0.75)", fontSize: 11, lineHeight: 1.6, marginBottom: 14 }}>
+          <b style={{ color: AMB }}>Two ways to read tables C & D:</b> (a) <b>With a next-gen forecast → read Table C.</b> It plays your forecast through each bridge length and reports total PV, so the smallest-PV row is the recommended bridge. (b) <b>Without a next-gen forecast → read Table D.</b> It reports Λ<sup>*</sup>(n) — the highest $/hr-equivalent next-gen could cost and still make bridge-n beat never-switching. Larger Λ<sup>*</sup>(n) = more forgiving bar. If you do have a forecast, the gap column shows Λ<sup>*</sup>(n) minus Table C's "Avg next-gen cost" — the largest green gap is the most attractive bridge.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+          <Sec title="C. Forecast-based — what next-gen actually delivers under your assumptions" style={{ marginBottom: 0 }}>
+            {forecastTable}
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginTop: 10, lineHeight: 1.55 }}>
+              Every number here depends on your next-gen inputs (launch price, inflation, decay, ultimate speedup, maturity ramp). Read it as: <em>"if my forecast is right, here's what each bridge strategy really costs."</em>
+              <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "rgba(255,255,255,0.6)" }}>
+                <li><b style={{ color: AMB }}>P<sub>curr</sub>(n)</b> — the current-gen rate you'd sign for an n-year contract (higher for shorter contracts).</li>
+                <li><b>P<sub>next</sub>(n)</b> — the next-gen contract rate at the moment you switch, i.e. year n. Locked at that rate for the rest of the horizon.</li>
+                <li><b style={{ color: GRW }}>σ(n)</b> — realized next-gen speedup at year n. Grows over time as the software stack matures (ramp from m<sub>0</sub> to 1).</li>
+                <li><b style={{ color: RO }}>Avg next-gen cost</b> — the average effective $/hr you actually pay on next-gen across all the years after you switch, in current-gen-equivalent units (i.e. adjusted for speedup). σ improves year by year during those years, so this is not just P<sub>next</sub>(n) / σ(n) — it's a discount-weighted average that gives credit for maturity gains that show up after the switch.</li>
+                <li><b>PV(n)</b> — total present-value cost of the whole bridge (both phases). Smallest wins — that row is highlighted violet.</li>
+              </ul>
+            </div>
+          </Sec>
+          <Sec title="D. Forecast-free — the break-even bar Λ*(n)" style={{ marginBottom: 0 }}>
+            {breakEvenTable}
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginTop: 10, lineHeight: 1.55 }}>
+              Every number here uses only current-gen prices and your discount rate — no next-gen assumptions at all. Read it as: <em>"without predicting anything about next-gen, here's the bar it would have to clear at each switch year."</em>
+              <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "rgba(255,255,255,0.6)" }}>
+                <li><b style={{ color: AMB }}>P<sub>curr</sub>(n)</b> — same as Table C.</li>
+                <li><b style={{ color: VIO }}>Λ<sup>*</sup>(n) break-even</b> — the highest $/hr-equivalent next-gen could cost while still making bridge-n at least as good as never-switching. If next-gen ends up cheaper than Λ<sup>*</sup>(n), bridging n years wins; if it ends up more expensive, you're better off staying on current-gen for the whole horizon. This is the "bar" — a number you can look at and judge against your own priors without needing the model to price P<sub>L</sub> or δ for you.</li>
+                <li><b>gap vs Λ<sup>*</sup></b> — Λ<sup>*</sup>(n) minus the "Avg next-gen cost" from Table C. <span style={{ color: GRW }}>Green (positive)</span> = your forecast is under the bar → bridging n years pays. <span style={{ color: RO }}>Red (negative)</span> = your forecast is over the bar → don't switch at that n.</li>
+              </ul>
+            </div>
+          </Sec>
+        </div>
+
         <H title="Assumptions" />
         <Sec title="Horizon & discount">
           <Row>
@@ -5555,7 +5723,7 @@ function TemporalApp() {
         </Sec>
         <Sec title="Current-generation (chip we'd sign new positions on)">
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12, marginBottom: 12 }}>
-            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 6, padding: "10px 12px" }}>
+            <div style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 6, padding: "10px 12px" }}>
               <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4, fontFamily: F }}>Current-gen GPU</div>
               <select value={currentGpu} onChange={e => setCurrentGpu(e.target.value)}
                 style={{ width: "100%", padding: "6px 8px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, color: "#e2e8f0", fontFamily: F, fontSize: 12 }}>
@@ -5613,7 +5781,7 @@ function TemporalApp() {
         </Sec>
         <Sec title="Next-generation (announced, not yet in book)">
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12, marginBottom: 12 }}>
-            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 6, padding: "10px 12px" }}>
+            <div style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 6, padding: "10px 12px" }}>
               <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4, fontFamily: F }}>Next-gen GPU</div>
               <select value={nextGenId} onChange={e => setNextGenId(e.target.value)}
                 style={{ width: "100%", padding: "6px 8px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, color: "#e2e8f0", fontFamily: F, fontSize: 12 }}>
@@ -5642,132 +5810,88 @@ function TemporalApp() {
           </div>
         </Sec>
         <Sec title="Workload & precision — decomposes σ into a physical blend">
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12, marginBottom: 12 }}>
-            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 6, padding: "10px 12px" }}>
-              <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4, fontFamily: F }}>Training share of workload</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginBottom: 8 }}>
+            {/* ── Picker 1: training share ─────────────────────────────── */}
+            <div style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 6, padding: "10px 12px" }}>
+              <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4, fontFamily: F }}>Training share</div>
               <select value={trainShareMode} onChange={e => setTrainShareMode(e.target.value)}
-                style={{ width: "100%", padding: "6px 8px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, color: "#e2e8f0", fontFamily: F, fontSize: 12, marginBottom: 6 }}>
-                <option value="auto" style={{ background: "#0b1118" }}>Auto — from Demand book</option>
+                style={{ width: "100%", padding: "5px 6px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, color: "#e2e8f0", fontFamily: F, fontSize: 11, marginBottom: 6 }}>
+                <option value="auto" style={{ background: "#0b1118" }}>Auto — Demand book</option>
                 <option value="manual" style={{ background: "#0b1118" }}>Manual override</option>
               </select>
               {trainShareMode === "manual" ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <input type="range" min={0} max={100} step={1} value={trainShareOverride} onChange={e => setTrainShareOverride(Number(e.target.value))} style={{ flex: 1, accentColor: VIO, height: 3 }} />
-                  <span style={{ fontSize: 12, color: VIO, fontFamily: F, fontWeight: 600, minWidth: 46, textAlign: "right" }}>{trainShareOverride}%</span>
+                  <span style={{ fontSize: 11, color: VIO, fontFamily: F, fontWeight: 600, minWidth: 34, textAlign: "right" }}>{trainShareOverride}%</span>
                 </div>
               ) : (
                 speedupDerivation && (
-                  <div style={{ fontSize: 11, color: VIO, fontFamily: F }}>w_train = <b>{(speedupDerivation.autoTrainShare * 100).toFixed(1)}%</b> · w_decode = <b>{((1 - speedupDerivation.autoTrainShare) * 100).toFixed(1)}%</b></div>
+                  <div style={{ fontSize: 11, color: VIO, fontFamily: F }}>w_t = <b>{(speedupDerivation.autoTrainShare * 100).toFixed(0)}%</b> · w_d = <b>{((1 - speedupDerivation.autoTrainShare) * 100).toFixed(0)}%</b></div>
                 )
               )}
-              <div style={{ fontSize: 9.5, color: MUT, marginTop: 6, lineHeight: 1.5 }}>Training/prefill is FLOPs-bound (σ_train). Decode is HBM-bandwidth-bound (σ_decode). σ_∞ is the mix-weighted blend.</div>
             </div>
-            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 6, padding: "10px 12px" }}>
+            {/* ── Picker 2: σ_∞ source ─────────────────────────────────── */}
+            <div style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 6, padding: "10px 12px" }}>
               <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4, fontFamily: F }}>σ_∞ source</div>
               <select value={sigmaMode} onChange={e => setSigmaMode(e.target.value)}
-                style={{ width: "100%", padding: "6px 8px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, color: "#e2e8f0", fontFamily: F, fontSize: 12, marginBottom: 6 }}>
-                <option value="derived" style={{ background: "#0b1118" }}>Derived — FLOPs / BW blend</option>
+                style={{ width: "100%", padding: "5px 6px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, color: "#e2e8f0", fontFamily: F, fontSize: 11, marginBottom: 6 }}>
+                <option value="derived" style={{ background: "#0b1118" }}>Derived — FLOPs/BW</option>
                 <option value="manual" style={{ background: "#0b1118" }}>Manual override</option>
               </select>
               {sigmaMode === "manual" ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <input type="range" min={1.0} max={6.0} step={0.05} value={sigmaManual} onChange={e => setSigmaManual(Number(e.target.value))} style={{ flex: 1, accentColor: VIO, height: 3 }} />
-                  <span style={{ fontSize: 12, color: VIO, fontFamily: F, fontWeight: 600, minWidth: 46, textAlign: "right" }}>{sigmaManual.toFixed(2)}×</span>
+                  <span style={{ fontSize: 11, color: VIO, fontFamily: F, fontWeight: 600, minWidth: 40, textAlign: "right" }}>{sigmaManual.toFixed(2)}×</span>
                 </div>
               ) : (
                 speedupDerivation && (
                   <div style={{ fontSize: 11, color: VIO, fontFamily: F }}>σ_∞ = <b>{speedupDerivation.sigmaBlend.toFixed(2)}×</b></div>
                 )
               )}
-              <div style={{ fontSize: 9.5, color: MUT, marginTop: 6, lineHeight: 1.5 }}>Override to sanity-check what a specific σ implies for the bridge decision.</div>
             </div>
+            {/* ── Derivation cells (σ_train, σ_decode, blend) ──────────── */}
+            {speedupDerivation && (
+              <>
+                <div style={{ background: "rgba(196,181,253,0.05)", border: "1px solid rgba(196,181,253,0.18)", borderRadius: 6, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4, fontFamily: F }}>σ_train (FLOPs @ {speedupDerivation.effPrec.toUpperCase()})</div>
+                  <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.6)", fontFamily: F, lineHeight: 1.5 }}>
+                    <span style={{ color: GRW }}>{fmtBigNum(speedupDerivation.tflopsNxt)}</span> <span style={{ color: MUT }}>(next-gen)</span><br />
+                    <span style={{ color: MUT }}>÷ </span><span style={{ color: AMB }}>{fmtBigNum(speedupDerivation.tflopsCur)}</span> <span style={{ color: MUT }}>(current-gen)</span>
+                  </div>
+                  <div style={{ fontSize: 14, color: GRW, fontFamily: F, fontWeight: 700, marginTop: 4 }}>= {speedupDerivation.sigmaTrain.toFixed(2)}×</div>
+                </div>
+                <div style={{ background: "rgba(196,181,253,0.05)", border: "1px solid rgba(196,181,253,0.18)", borderRadius: 6, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4, fontFamily: F }}>σ_decode (HBM BW)</div>
+                  <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.6)", fontFamily: F, lineHeight: 1.5 }}>
+                    <span style={{ color: CYAN }}>{speedupDerivation.nxt.bw}</span> <span style={{ color: MUT }}>(next-gen)</span><br />
+                    <span style={{ color: MUT }}>÷ </span><span style={{ color: AMB }}>{speedupDerivation.cur.bw}</span> <span style={{ color: MUT }}>(current-gen)</span>
+                  </div>
+                  <div style={{ fontSize: 14, color: CYAN, fontFamily: F, fontWeight: 700, marginTop: 4 }}>= {speedupDerivation.sigmaDecode.toFixed(2)}×</div>
+                </div>
+                <div style={{ background: "rgba(196,181,253,0.05)", border: "1px solid rgba(196,181,253,0.18)", borderRadius: 6, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 10, color: MUT, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4, fontFamily: F }}>Blend (w_t={(speedupDerivation.wTrain * 100).toFixed(0)}%)</div>
+                  <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.6)", fontFamily: F, lineHeight: 1.5 }}>
+                    {sigmaMode === "manual"
+                      ? <span style={{ color: RO }}>overridden manually</span>
+                      : <>weighted avg of σ_train &amp; σ_decode</>}
+                  </div>
+                  <div style={{ fontSize: 14, color: VIO, fontFamily: F, fontWeight: 700, marginTop: 4 }}>σ_∞ = {(sigmaMode === "manual" ? sigmaManual : speedupDerivation.sigmaBlend).toFixed(2)}×</div>
+                </div>
+              </>
+            )}
           </div>
           {speedupDerivation && (
-            <div style={{ background: "rgba(196,181,253,0.05)", border: "1px solid rgba(196,181,253,0.15)", borderRadius: 6, padding: "10px 14px", fontSize: 11, color: "rgba(255,255,255,0.75)", fontFamily: F, lineHeight: 1.6 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
-                <div><span style={{ color: MUT }}>σ_train (FLOPs @ {speedupDerivation.effPrec.toUpperCase()}):</span><br />{fmtBigNum(speedupDerivation.tflopsNxt)} / {fmtBigNum(speedupDerivation.tflopsCur)} = <b style={{ color: GRW }}>{speedupDerivation.sigmaTrain.toFixed(2)}×</b></div>
-                <div><span style={{ color: MUT }}>σ_decode (HBM BW):</span><br />{speedupDerivation.nxt.bw} / {speedupDerivation.cur.bw} = <b style={{ color: CYAN }}>{speedupDerivation.sigmaDecode.toFixed(2)}×</b></div>
-                <div><span style={{ color: MUT }}>Blend at w_train={(speedupDerivation.wTrain * 100).toFixed(0)}%:</span><br /><b style={{ color: VIO }}>σ_∞ = {speedupDerivation.sigmaBlend.toFixed(2)}×</b>{sigmaMode === "manual" && <span style={{ color: RO }}> (overridden to {sigmaManual.toFixed(2)}×)</span>}</div>
-              </div>
-              <div style={{ fontSize: 9.5, color: MUT, marginTop: 8, lineHeight: 1.5, paddingTop: 8, borderTop: "1px solid rgba(196,181,253,0.15)" }}>
-                Precision used for σ_train: <b style={{ color: VIO }}>{speedupDerivation.effPrec.toUpperCase()}</b> — the highest tensor precision natively supported by both chips ({speedupDerivation.cur.label} and {speedupDerivation.nxt.label}). Fair comparison uses matched precision on both sides.
-              </div>
+            <div style={{ fontSize: 9.5, color: MUT, lineHeight: 1.5 }}>
+              σ_train and σ_decode both divide <b style={{ color: GRW }}>next-gen</b> capability by <b style={{ color: AMB }}>current-gen</b> capability — a ratio &gt; 1 means the next-gen chip ({speedupDerivation.nxt.label}) is faster than the current-gen chip ({speedupDerivation.cur.label}) on that dimension. Training uses FLOPs at <b style={{ color: VIO }}>{speedupDerivation.effPrec.toUpperCase()}</b> (highest precision both chips natively support); decode uses HBM bandwidth. σ_∞ blends the two at your training/decode share.
             </div>
           )}
         </Sec>
 
-        <H title="Result — optimal bridge length" />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 14 }}>
-          <Kpi label="Optimal bridge n*" value={best ? best.n + " yr" : "—"} sub={best ? (best.n === 0 ? "switch immediately at launch" : best.n === horizon ? "never switch — ride current-gen full horizon" : `bridge ${best.n} yr → switch to next-gen`) : ""} accent={VIO} />
-          <Kpi label="PV @ optimal" value={best ? fmt$(best.pv, 2) : "—"} sub={best ? `per unit of work over ${horizon}y` : ""} accent={GRW} />
-          <Kpi label="PV never-switch" value={neverSwitch ? fmt$(neverSwitch.pv, 2) : "—"} sub={best && neverSwitch && best.n !== horizon ? "savings vs. never = " + fmt$(neverSwitch.pv - best.pv, 2) : "baseline"} accent={AMB} />
-          <Kpi label="PV switch-earliest" value={switchAsap ? fmt$(switchAsap.pv, 2) : "—"} sub={switchAsap ? `bridge = ${switchAsap.n} yr (n_min = ⌈t_L⌉)` : ""} accent={CYAN} />
-          <Kpi label="σ break-even @ n*" value={sigmaStar ? fmtx(sigmaStar, 2) : "—"} sub={sigmaAtBest ? `realized σ(n*) = ${fmtx(sigmaAtBest, 2)} ${sigmaAtBest > sigmaStar ? "✓ clears" : "✗ misses"} bar` : "at last valid n"} accent={sigmaAtBest && sigmaStar && sigmaAtBest >= sigmaStar ? GRW : RO} />
-          <Kpi label="Wait one more?" value={marginal.dNextYr === null ? "n/a" : (marginal.dNextYr > 0 ? "STOP" : "WAIT")} sub={marginal.dNextYr === null ? "at last valid n" : (marginal.dNextYr > 0 ? `+${fmt$(marginal.dNextYr, 2)} to bridge one more yr` : `${fmt$(marginal.dNextYr, 2)} to bridge one more yr`)} accent={marginal.dNextYr === null ? MUT : (marginal.dNextYr > 0 ? RO : GRW)} />
-        </div>
-
-        <Sec title="PV of total cost by bridge length (per unit of work)">
-          {pvChart}
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 4, lineHeight: 1.5 }}>
-            Each bar is one bridge choice: run current-gen for <b>n</b> years then switch to next-gen for the remaining <b>N−n</b> years, PV'd back to today. Optimal <b>n*</b> highlighted in violet. If PV is monotone increasing → never switch; if monotone decreasing → switch as early as possible; if U-shaped → interior optimum. Current-gen rate for shorter contracts scales up per the <b>{fmtPc(termDiscount, 1)}/yr</b> contract length discount (a shorter contract gives back years of the discount).
-          </div>
-        </Sec>
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-          <Sec title="A. Contract prices — P_next(t) vs. P_curr(N) anchor" style={{ marginBottom: 0 }}>
-            {priceChart}
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 4, lineHeight: 1.5 }}>
-              Raw quoted rates. <span style={{ color: AMB }}>P<sub>next</sub>(t)</span> is two-regime — inflates at {fmtPc(inflationRate, 0)}/yr from launch through t<sup>★</sup>={fmtY(tNorm, 1)}, then decays at {fmtPc(decayRate, 0)}/yr. The <span style={{ color: AMB }}>P<sub>curr</sub>(N)</span> dashed line is the current-gen full-horizon lock we're comparing against. Where the trajectory crosses under the dashed line = when next-gen becomes cheaper per contracted GPU-hour (before adjusting for speedup).
-            </div>
-          </Sec>
-          <Sec title="B. Effective unit cost Λ(t) vs. P_curr(N) anchor" style={{ marginBottom: 0 }}>
-            {unitCostChart}
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 4, lineHeight: 1.5 }}>
-              Speedup-adjusted. <span style={{ color: RO }}>Λ(t) = P<sub>next</sub>(t) / σ(t)</span> is what next-gen actually costs per unit of work — speedup already baked in via σ(t) rising from {fmtPc(maturityInit, 0)} of σ<sub>∞</sub> at launch to 100% over {fmtY(maturityYears, 1)}. Where Λ crosses under the <span style={{ color: AMB }}>P<sub>curr</sub>(N)</span> anchor is when next-gen wins per unit of work delivered — the actionable moment.
-            </div>
-          </Sec>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-          <Sec title="A. Forecast-based — what next-gen actually delivers under your assumptions" style={{ marginBottom: 0 }}>
-            {forecastTable}
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginTop: 10, lineHeight: 1.55 }}>
-              Every number here depends on your next-gen inputs (launch price, inflation, decay, ultimate speedup, maturity ramp). Read it as: <em>"if my forecast is right, here's what each bridge strategy really costs."</em>
-              <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "rgba(255,255,255,0.6)" }}>
-                <li><b style={{ color: AMB }}>P<sub>curr</sub>(n)</b> — the current-gen rate you'd sign for an n-year contract (higher for shorter contracts).</li>
-                <li><b>P<sub>next</sub>(n)</b> — the next-gen contract rate at the moment you switch, i.e. year n. Locked at that rate for the rest of the horizon.</li>
-                <li><b style={{ color: GRW }}>σ(n)</b> — realized next-gen speedup at year n. Grows over time as the software stack matures (ramp from m<sub>0</sub> to 1).</li>
-                <li><b style={{ color: RO }}>Avg next-gen cost</b> — the average effective $/hr you actually pay on next-gen across all the years after you switch, in current-gen-equivalent units (i.e. adjusted for speedup). σ improves year by year during those years, so this is not just P<sub>next</sub>(n) / σ(n) — it's a discount-weighted average that gives credit for maturity gains that show up after the switch.</li>
-                <li><b>PV(n)</b> — total present-value cost of the whole bridge (both phases). Smallest wins — that row is highlighted violet.</li>
-              </ul>
-            </div>
-          </Sec>
-          <Sec title="B. Forecast-free — the break-even bar Λ*(n)" style={{ marginBottom: 0 }}>
-            {breakEvenTable}
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginTop: 10, lineHeight: 1.55 }}>
-              Every number here uses only current-gen prices and your discount rate — no next-gen assumptions at all. Read it as: <em>"without predicting anything about next-gen, here's the bar it would have to clear at each switch year."</em>
-              <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "rgba(255,255,255,0.6)" }}>
-                <li><b style={{ color: AMB }}>P<sub>curr</sub>(n)</b> — same as Table A.</li>
-                <li><b style={{ color: VIO }}>Λ<sup>*</sup>(n) break-even</b> — the highest $/hr-equivalent next-gen could cost while still making bridge-n at least as good as never-switching. If next-gen ends up cheaper than Λ<sup>*</sup>(n), bridging n years wins; if it ends up more expensive, you're better off staying on current-gen for the whole horizon. This is the "bar" — a number you can look at and judge against your own priors without needing the model to price P<sub>L</sub> or δ for you.</li>
-                <li><b>gap vs Λ<sup>*</sup></b> — Λ<sup>*</sup>(n) minus the "Avg next-gen cost" from Table A. <span style={{ color: GRW }}>Green (positive)</span> = your forecast is under the bar → bridging n years pays. <span style={{ color: RO }}>Red (negative)</span> = your forecast is over the bar → don't switch at that n.</li>
-              </ul>
-            </div>
-          </Sec>
-        </div>
-        <div style={{ padding: "10px 14px", background: "rgba(251,191,36,0.05)", border: "1px solid rgba(251,191,36,0.15)", borderRadius: 4, color: "rgba(255,255,255,0.75)", fontSize: 11, lineHeight: 1.6, marginBottom: 14 }}>
-          <b style={{ color: AMB }}>Two ways to read this pair:</b> (a) <b>Without a next-gen forecast</b>: read only Table B. Larger Λ<sup>*</sup>(n) = more forgiving bar = easier for a bridge to pay off if next-gen comes in at any reasonable price. (b) <b>With a next-gen forecast</b>: compare Table A's "Avg next-gen cost" to Table B's Λ<sup>*</sup>(n). The gap column shows the difference — the row with the largest green gap is the most attractive bridge.
-        </div>
-
         <H title="Derivation — how the equations were built" />
         <Sec title={`${steps.length} steps from primitives to the practical inverted form`}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)", lineHeight: 1.6, flex: 1 }}>
-              Nothing is assumed except the definitions themselves — physics first, accounting on top, forecasting inputs collapsed into a single observable at the end.
-            </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <button type="button" onClick={(e) => { e.preventDefault(); setExpandedSteps(new Set(steps.map((_, i) => i))); }} style={{ background: "rgba(196,181,253,0.08)", border: "1px solid rgba(196,181,253,0.25)", color: VIO, borderRadius: 4, padding: "5px 10px", fontSize: 10, fontFamily: F, fontWeight: 600, cursor: "pointer", letterSpacing: "0.05em", textTransform: "uppercase" }}>Expand all</button>
-              <button type="button" onClick={(e) => { e.preventDefault(); setExpandedSteps(new Set()); }} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.1)", color: MUT2, borderRadius: 4, padding: "5px 10px", fontSize: 10, fontFamily: F, fontWeight: 600, cursor: "pointer", letterSpacing: "0.05em", textTransform: "uppercase" }}>Collapse all</button>
-            </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6, marginBottom: 14 }}>
+            <button type="button" onClick={(e) => { e.preventDefault(); setExpandedSteps(new Set(steps.map((_, i) => i))); }} style={{ background: "rgba(196,181,253,0.08)", border: "1px solid rgba(196,181,253,0.25)", color: VIO, borderRadius: 4, padding: "5px 10px", fontSize: 10, fontFamily: F, fontWeight: 600, cursor: "pointer", letterSpacing: "0.05em", textTransform: "uppercase" }}>Expand all</button>
+            <button type="button" onClick={(e) => { e.preventDefault(); setExpandedSteps(new Set()); }} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.1)", color: MUT2, borderRadius: 4, padding: "5px 10px", fontSize: 10, fontFamily: F, fontWeight: 600, cursor: "pointer", letterSpacing: "0.05em", textTransform: "uppercase" }}>Collapse all</button>
           </div>
           {steps.map((s, i) => {
             const open = expandedSteps.has(i);
