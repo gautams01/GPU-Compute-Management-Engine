@@ -533,10 +533,13 @@ function Select({ label, value, onChange, options, hint }) {
     </Field>
   );
 }
-function Section({ title, children, style: s }) {
+function Section({ title, children, style: s, right }) {
   return (
     <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.1)", ...s }}>
-      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10, fontFamily: F, fontWeight: 600 }}>{title}</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", textTransform: "uppercase", letterSpacing: "0.08em", fontFamily: F, fontWeight: 600 }}>{title}</div>
+        {right}
+      </div>
       {children}
     </div>
   );
@@ -886,34 +889,33 @@ function generateCandidates(commitLevels, cascade, supplyBuckets, demandByScenar
     // Above commitLevel is the FLEX tranche — never committed, OD/spot only.
     const safeSize = Math.max(0, cl.weakD - curSup);
     const ladderSize = Math.max(0, cl.commitLevel - Math.max(cl.weakD, curSup));
-    const buildCandidate = (sizeH100e, kind) => {
-      if (sizeH100e <= 1) return null;
-      const gpusNeeded = Math.max(64, Math.round(sizeH100e * SUPPLY_GPUS.H100.tflops / g.tflops / 8) * 8);
-      const rate = cl.reservedRate * 0.98;
-      // Longer terms for the safe floor (robust; fractile floor is stable).
-      // Ladder is short — you're waiting on a signal.
-      const termMo = kind === "safe" ? (cl.fractile > 0.55 ? 36 : 24) : 12;
-      // Diversify vendor selection across buckets so recommendations don't
-      // all pile onto one operator and trip the 40% concentration cap. Rotate
-      // through the eligible cohort using a deterministic hash of (key+kind).
-      const vendorList = PROVIDERS.filter(p => {
+    // Build the eligible vendor cohort for a given tranche term. cmax gates
+    // are the same as before: 24mo+ terms require platinum/gold operators
+    // (bronze can't hold a 2-year commitment); shorter terms drop bronze but
+    // allow anyone else. Each vendor gets its own priced offer — platinum
+    // charges a 6% premium on rate and demands 20% upfront, gold +3% / 15%,
+    // silver flat / 10%.
+    const eligibleVendors = (termMo) => {
+      const list = PROVIDERS.filter(p => {
         const c = cmaxOf(p);
         if (termMo >= 24) return c === "platinum" || c === "gold";
         return c && c !== "bronze";
       });
-      if (!vendorList.length) vendorList.push("CoreWeave");
-      // Deterministic hash so re-renders give stable vendor assignments
-      let h = 0; const seed = key + "|" + kind;
-      for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-      const primaryIdx = h % vendorList.length;
-      const rotated = vendorList.slice(primaryIdx).concat(vendorList.slice(0, primaryIdx)).slice(0, 3);
-      const vendors = rotated.map(p => ({
+      if (!list.length) list.push("CoreWeave");
+      const rate = cl.reservedRate * 0.98;
+      return list.map(p => ({
         name: p,
         rate: rate * (cmaxOf(p) === "platinum" ? 1.06 : cmaxOf(p) === "gold" ? 1.03 : 1.0),
         cmax: cmaxOf(p),
         prepay: cmaxOf(p) === "platinum" ? 20 : cmaxOf(p) === "gold" ? 15 : 10,
       }));
-      const vendor = vendors[0];
+    };
+    const buildCandidateFor = (sizeH100e, kind, vendor, allVendors) => {
+      if (sizeH100e <= 1) return null;
+      const gpusNeeded = Math.max(64, Math.round(sizeH100e * SUPPLY_GPUS.H100.tflops / g.tflops / 8) * 8);
+      // Longer terms for the safe floor (robust; fractile floor is stable).
+      // Ladder is short — you're waiting on a signal.
+      const termMo = kind === "safe" ? (cl.fractile > 0.55 ? 36 : 24) : 12;
       const rampMo = 3;
       // Contract mechanics (effRate incl. prepay carry, upfront$). Util=100
       // because scenario revenue is computed ourselves at CUSTOMER prices —
@@ -1015,19 +1017,63 @@ function generateCandidates(commitLevels, cascade, supplyBuckets, demandByScenar
       // the action taxonomy small: use "sign" for safe pass, "decline" for
       // safe fail, "ladder" for ladder pass, "decline" for ladder fail.
       const actionFor = kind === "safe" ? (passes ? "sign" : "decline") : (passes ? "ladder" : "decline");
+      // Explain the failure so the collapsed DECLINE panel can show WHY
+      // rather than just "we tried and rejected it". Reads the specific gate
+      // that flipped false; if both, list both.
+      let declineReason = null;
+      if (actionFor === "decline") {
+        const fails = [];
+        if (kind === "safe") {
+          if (!gates.profitableAtWeakUtil) fails.push(`margin < 0 at weak-case util (marginHr $${(perScenario.weak?.marginHr ?? 0).toFixed(3)}/H100e-hr)`);
+          if (!gates.weakUtilFloor) fails.push(`weak-case util ${(weakUtil * 100).toFixed(0)}% below ${(params.weakUtilFloor * 100).toFixed(0)}% floor`);
+        } else {
+          if (!gates.profitableAtBaseUtil) fails.push(`margin < 0 at base-case util (marginHr $${(perScenario.base?.marginHr ?? 0).toFixed(3)}/H100e-hr)`);
+          if (!gates.baseUtilFloor) fails.push(`base-case util ${((perScenario.base?.util ?? 0) * 100).toFixed(0)}% below ${(params.weakUtilFloor * 100).toFixed(0)}% floor`);
+        }
+        declineReason = fails.length ? fails.join("; ") : "local margin gate";
+      }
       return {
-        id: key + "-" + kind, key, gpu, fab, region,
+        id: key + "-" + kind + "-" + vendor.name, key, gpu, fab, region,
         action: actionFor,
         targetH100e: sizeH100e, gpus: gpusNeeded, termMo,
-        rate: vendor.rate, vendor, vendors, prepaid,
+        rate: vendor.rate, vendor, vendors: allVendors, prepaid,
         EV, downside, evPerDollar, perScenario, weakUtil, fractile: cl.fractile,
         trigger: kind === "safe" ? "now — committed tranche (weak-covered floor)" : "mo 6 — ladder increment, sign only if base trajectory confirms",
         tranche: kind,
         gates,
+        declineReason,
       };
     };
-    const safeCand = buildCandidate(safeSize, "safe");
-    const ladderCand = buildCandidate(ladderSize, "ladder");
+    // Sweep every eligible vendor per tranche, keep the winner. Ranking:
+    // (1) prefer candidates that PASS the local margin gate over ones that
+    // fail — a passing SIGN beats a "higher-EV but marginally unprofitable"
+    // one; (2) among peers, highest EV/$-prepaid wins. If ALL vendors fail
+    // the local gate the "winner" is still the best-scoring loser, so it
+    // shows up as a DECLINE with an honest reason rather than silently
+    // dropping the bucket. Downstream (stage 10) can still gate the winner
+    // on concentration / prepay caps.
+    const pickBest = (sizeH100e, kind) => {
+      if (sizeH100e <= 1) return null;
+      const termMo = kind === "safe" ? (cl.fractile > 0.55 ? 36 : 24) : 12;
+      const vendors = eligibleVendors(termMo);
+      const perVendor = vendors.map(v => buildCandidateFor(sizeH100e, kind, v, vendors)).filter(Boolean);
+      if (!perVendor.length) return null;
+      perVendor.sort((a, b) => {
+        const aPass = a.action !== "decline" ? 1 : 0;
+        const bPass = b.action !== "decline" ? 1 : 0;
+        if (aPass !== bPass) return bPass - aPass;
+        return (b.evPerDollar || 0) - (a.evPerDollar || 0);
+      });
+      const winner = perVendor[0];
+      // Stash the ranked alternates so stage 10 can swap the vendor when the
+      // primary trips a book-level guardrail (concentration cap). Each alt is
+      // a fully-scored candidate with its own vendor's rate/prepay/EV — no
+      // approximation needed on swap.
+      winner.alternates = perVendor.slice(1);
+      return winner;
+    };
+    const safeCand = pickBest(safeSize, "safe");
+    const ladderCand = pickBest(ladderSize, "ladder");
     if (safeCand) cands.push(safeCand);
     if (ladderCand) cands.push(ladderCand);
   }
@@ -1089,14 +1135,66 @@ function applyBookGuardrails(recs, book, params) {
     for (let m = 1; m <= (r.remMo || 0); m++) liveMo += liveFracOf(r, m);
     return s + r.gpus * r.rate * HRS_MO * liveMo;
   }, 0);
+  // Existing-book obligation "if we started counting from month mStart" —
+  // i.e., how much take-or-pay is still ahead of us if we push the sign date
+  // out by mStart months. Non-increasing in mStart: as positions roll off,
+  // the residual obligation shrinks. Used to price DEFER candidates.
+  const bookObligationFrom = (mStart) => {
+    let s = 0;
+    for (const r of active) {
+      let liveMo = 0;
+      for (let m = mStart + 1; m <= (r.remMo || 0); m++) liveMo += liveFracOf(r, m);
+      s += r.gpus * r.rate * HRS_MO * liveMo;
+    }
+    return s;
+  };
+  const MAX_DEFER_MO = 24;
+  // Layered obligation from earlier-deferred deals — added to the residual
+  // book baseline so subsequent defers push further into the future rather
+  // than all stacking at the same "first feasible" month. Conservative: full
+  // contract value counted through the entire search window.
+  let deferredCommitted = 0;
   let runningPrepaid = 0, bronzePrepaid = 0;
   for (const rec of recs) {
     const flags = [];
     if (rec.action === "sign" || rec.action === "ladder") {
+      // Concentration swap: if the primary vendor would trip the 40% cap and
+      // ranked alternates exist (stored on rec.alternates from the per-bucket
+      // vendor sweep in generateCandidates), promote the first alt whose share
+      // would still fit. Each alt is a full candidate — swapping copies its
+      // vendor, rate, prepaid, EV, and perScenario onto the rec so downstream
+      // math sees the correct economics. Only when NO alt fits do we flag.
+      const gpusAdded = rec.gpus || 0;
+      const primaryName = rec.vendor?.name || "unknown";
+      if (projectedTotal >= CONC_FLOOR && rec.alternates && rec.alternates.length) {
+        const shareOf = (name) => (byVendorProjected[name] || 0) / projectedTotal;
+        if (shareOf(primaryName) > 0.4) {
+          for (const alt of rec.alternates) {
+            const altName = alt.vendor?.name;
+            if (!altName || altName === primaryName) continue;
+            const altShareIfSwap = ((byVendorProjected[altName] || 0) + gpusAdded) / projectedTotal;
+            if (altShareIfSwap <= 0.4) {
+              byVendorProjected[primaryName] = Math.max(0, (byVendorProjected[primaryName] || 0) - gpusAdded);
+              byVendorProjected[altName] = (byVendorProjected[altName] || 0) + gpusAdded;
+              rec.vendor = alt.vendor;
+              rec.rate = alt.rate;
+              rec.prepaid = alt.prepaid;
+              rec.EV = alt.EV;
+              rec.downside = alt.downside;
+              rec.evPerDollar = alt.evPerDollar;
+              rec.perScenario = alt.perScenario;
+              rec.weakUtil = alt.weakUtil;
+              rec.gates = alt.gates;
+              rec.vendorSwappedFrom = primaryName;
+              break;
+            }
+          }
+        }
+      }
       const vName = rec.vendor?.name || "unknown";
       if (projectedTotal >= CONC_FLOOR) {
         const vShare = (byVendorProjected[vName] || 0) / projectedTotal;
-        if (vShare > 0.4) flags.push({ warn: true, text: `${vName} would hit ${fmtPct(vShare)} of the projected ${projectedTotal.toLocaleString()}-GPU book — >40% concentration cap` });
+        if (vShare > 0.4) flags.push({ warn: true, text: `${vName} would hit ${fmtPct(vShare)} of the projected ${projectedTotal.toLocaleString()}-GPU book — >40% concentration cap (no alternate vendor with headroom)` });
       }
       const dealPrepaid = rec.prepaid || 0;
       if (rec.vendor?.cmax === "bronze") { bronzePrepaid += dealPrepaid; if (bronzePrepaid > totalRev * 0.10) flags.push({ warn: true, text: "Bronze vendor prepaid capital would exceed 10% of ARR cap" }); }
@@ -1105,10 +1203,31 @@ function applyBookGuardrails(recs, book, params) {
       if (rec.fab === "eth" && rec.gpu !== "L40S") flags.push({ warn: true, text: "Standard Ethernet on non-inference chip — restricted from multi-node training" });
       // Total-spend / solvency gate. Full contract value of this tranche.
       const dealSpend = (rec.gpus || 0) * (rec.rate || 0) * HRS_MO * (rec.termMo || 0);
-      if (runningSpend + dealSpend > totalSpendCap) {
+      const wouldBreachSpend = runningSpend + dealSpend > totalSpendCap;
+      if (!wouldBreachSpend) runningSpend += dealSpend;
+      // DEFER path: if spend cap is the ONLY thing blocking this deal
+      // (concentration/prepay/ethernet all clean), search for the earliest
+      // month where existing-book obligation has rolled off enough — layered
+      // over any earlier defers in this pass — to fit the deal under the cap.
+      // "Sign later" is a distinct action from "sign now" or "decline".
+      if (wouldBreachSpend && flags.length === 0) {
+        let deferAt = null;
+        for (let mStart = 1; mStart <= MAX_DEFER_MO; mStart++) {
+          const bookAt = bookObligationFrom(mStart);
+          if (bookAt + deferredCommitted + dealSpend <= totalSpendCap) { deferAt = mStart; break; }
+        }
+        if (deferAt != null) {
+          rec.action = "defer";
+          rec.deferAt = deferAt;
+          rec.trigger = `mo ${deferAt} — sign then; existing book rolls off to $${(bookObligationFrom(deferAt) / 1e6).toFixed(0)}M by then, fits under $${(totalSpendCap / 1e6).toFixed(0)}M cap`;
+          rec.note = rec.trigger;
+          rec.flags = [];
+          deferredCommitted += dealSpend;
+          continue;
+        }
+        flags.push({ warn: true, text: `Cumulative committed spend would exceed $${(totalSpendCap / 1e6).toFixed(0)}M total-spend cap (baseline $${(runningSpend / 1e6).toFixed(0)}M + this deal $${(dealSpend / 1e6).toFixed(0)}M); no month within ${MAX_DEFER_MO} mo frees enough headroom to defer` });
+      } else if (wouldBreachSpend) {
         flags.push({ warn: true, text: `Cumulative committed spend would exceed $${(totalSpendCap / 1e6).toFixed(0)}M total-spend cap (baseline $${(runningSpend / 1e6).toFixed(0)}M + this deal $${(dealSpend / 1e6).toFixed(0)}M)` });
-      } else {
-        runningSpend += dealSpend;
       }
     } else if (rec.action === "renew" || rec.action === "renew-partial") {
       // Renewals extend an existing position's term, adding new commitment
@@ -1950,7 +2069,7 @@ function App() {
               <Slider label="Weak-case util floor" value={weakUtilFloor} onChange={setWeakUtilFloor} min={0} max={80} step={5} fmtFn={v => v + "%"} hint={`stranding-risk gate: a new deal must have at least ${weakUtilFloor}% of its capacity actually filled under the WEAK scenario, or it's declined. A deal can be profitable-per-hour at low utilization and still be a bad capital deployment (paying take-or-pay on mostly-idle GPUs). Raising this makes the engine only sign deals it's highly confident will fill; lowering it lets speculative bets through.`} />
               <Slider label="Annualized revenue baseline" value={arrRunM} onChange={setArrRunM} min={100} max={2000} step={50} fmtFn={v => "$" + v + "M"} hint={`your platform's current run-rate revenue (approximate). Used purely as a size reference — the prepaid cap below is expressed as a % of this number, so a $${arrRunM}M ARR business with a ${prepaidCapPct}% cap can have up to $${(arrRunM * prepaidCapPct / 100).toFixed(0)}M outstanding in prepaid deposits. Set this to what your CFO reports for ARR.`} />
               <Slider label="Prepaid capital cap" value={prepaidCapPct} onChange={setPrepaidCapPct} min={5} max={40} step={1} fmtFn={v => v + "% of ARR"} hint={`liquidity-risk gate: caps the total prepaid cash we can have outstanding across ALL active reserved contracts at ${prepaidCapPct}% of ARR (${"$"+(arrRunM * prepaidCapPct / 100).toFixed(0)}M today). Each candidate deal's upfront cash is added to the running total; the first deal that would breach the cap is declined. Prevents the book from turning into a working-capital sink where a downturn traps too much cash in take-or-pay commitments.`} />
-              <Slider label="Total-spend cap" value={totalSpendCapM} onChange={setTotalSpendCapM} min={100} max={5000} step={50} fmtFn={v => "$" + v.toLocaleString() + "M"} hint={`solvency gate on the balance sheet as a whole: caps CUMULATIVE committed spend — existing reserved book (contract value to term end, ramp-adjusted) + every new sign / ladder / renew tranche — at $${totalSpendCapM.toLocaleString()}M. Distinct from the prepaid cap: prepaid limits cash already out the door, this limits total contractual obligation (take-or-pay you'd owe even if revenue vanished tomorrow). Signs and ladders that would breach are declined; renewals that would breach are downgraded to LAPSE. Set this to what the CFO / board considers the maximum defensible compute obligation for the business — a soft version of "how much can we go into the hole before we go bankrupt."`} />
+              <Slider label="Total-spend cap" value={totalSpendCapM} onChange={setTotalSpendCapM} min={100} max={5000} step={50} fmtFn={v => "$" + v.toLocaleString() + "M"} hint={`solvency gate on the balance sheet as a whole: caps CUMULATIVE committed spend — existing reserved book (contract value to term end, ramp-adjusted) + every new sign / ladder / renew tranche — at $${totalSpendCapM.toLocaleString()}M. Distinct from the prepaid cap: prepaid limits cash already out the door, this limits total contractual obligation (take-or-pay you'd owe even if revenue vanished tomorrow). Signs and ladders that trip ONLY this gate get downgraded to DEFER — the engine finds the earliest future month where existing positions have rolled off enough to admit the deal under the cap, and recommends signing then. If no month within 24 mo works (or another gate also fails), the deal becomes DECLINE. Renewals that would breach are downgraded to LAPSE. Set this to what the CFO / board considers the maximum defensible compute obligation for the business — a soft version of "how much can we go into the hole before we go bankrupt."`} />
               <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.35)", fontFamily: F, marginTop: 4, lineHeight: 1.5 }}>
                 Two other portfolio checks are hard-coded (not sliders): no single vendor {'>'}40% of the projected book once the book exceeds 2,000 GPUs (concentration risk), and no plain Ethernet on a training-class chip (multi-node training doesn't work over standard Ethernet). Cost of capital ({wacc}%/yr) and market decline ({mktDecline}%/yr) also feed the engine — set on the Compute Supply tab.
               </div>
@@ -2111,81 +2230,151 @@ function App() {
         </Section>
 
         {/* ── Recommendation table ── */}
-        <Section title="Recommendations — sign / ladder / renew / lapse / decline for ONE book" style={{ marginBottom: 12 }}>
+        <Section
+          title="Recommendations — sign / ladder / defer / renew / lapse / decline for ONE book"
+          style={{ marginBottom: 12 }}
+          right={
+            <div
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 9px", background: "rgba(251,191,36,0.06)", border: "1px solid rgba(251,191,36,0.25)", borderRadius: 4, fontSize: 9.5, fontFamily: F, whiteSpace: "nowrap" }}
+              title="From the Supply Chain Bottlenecks tab: HBM + advanced packaging are the pacing constraints and begin meaningfully easing H2 2027 as HBM4 volume and new CoWoS fabs (AP6, AP7) ramp. Silicon balance closer to 2028 when N2 wafers scale. DC power is structural and keeps effective AI-compute supply tight into 2029+. Not fed into the engine's math — surfaced here as context on whether new sign / defer recommendations sit against a tightening or loosening supply backdrop."
+            >
+              <span style={{ color: AMB, fontSize: 8 }}>●</span>
+              <span style={{ color: "#e2e8f0", fontWeight: 600 }}>Aggregate supply bottleneck: easing H2 2027</span>
+              <span style={{ color: "rgba(255,255,255,0.3)" }}>· from Bottlenecks tab</span>
+            </div>
+          }
+        >
           {(() => {
-            const actColor = { sign: "#6ee7b7", renew: "#6ee7b7", "renew-partial": AMB, ladder: "#67e8f9", lapse: "rgba(255,255,255,0.55)", decline: "#f87171" };
-            const actOrder = { sign: 0, ladder: 1, renew: 2, "renew-partial": 3, lapse: 4, decline: 5 };
+            const actColor = { sign: "#6ee7b7", renew: "#6ee7b7", "renew-partial": AMB, ladder: "#67e8f9", defer: "#a78bfa", lapse: "rgba(255,255,255,0.55)", decline: "#f87171" };
+            const actOrder = { sign: 0, ladder: 1, defer: 2, renew: 3, "renew-partial": 4, lapse: 5, decline: 6 };
             const rows = [...recommendations].sort((a, b) => (actOrder[a.action] ?? 9) - (actOrder[b.action] ?? 9) || (b.evPerDollar || 0) - (a.evPerDollar || 0));
-            const btnLabel = { sign: "ADD TO BOOK", ladder: "ADD (TRIGGER)", renew: "EXTEND", "renew-partial": "EXTEND ½", lapse: "REMOVE", decline: null };
+            const activeRows = rows.filter(r => r.action !== "decline");
+            const declinedRows = rows.filter(r => r.action === "decline");
+            const btnLabel = { sign: "ADD TO BOOK", ladder: "ADD (TRIGGER)", defer: null, renew: "EXTEND", "renew-partial": "EXTEND ½", lapse: "REMOVE", decline: null };
+            const timingLabel = (r) => {
+              if (r.action === "sign") return "now";
+              if (r.action === "ladder") return "mo 6 (trigger)";
+              if (r.action === "defer") return "mo " + (r.deferAt || "?");
+              if (r.action === "renew" || r.action === "renew-partial") return "at expiry";
+              if (r.action === "lapse") return "at expiry";
+              return "—";
+            };
+            const renderHead = (extraCol) => (
+              <thead style={{ position: "sticky", top: 0, background: "#0f172a", zIndex: 1 }}><tr>
+                <th style={th("left")}>ACTION</th>
+                <th style={th("left")} title="when the deal is signed. SIGN = now; LADDER = month 6 conditional on base trajectory; DEFER = future month when existing book has rolled off enough to fit under the total-spend cap; RENEW/LAPSE = at position expiry.">SIGN DATE</th>
+                <th style={th("left")}>VENDOR</th>
+                <th style={th("left")}>GPU · FABRIC · REGION</th>
+                <th style={th()}>SIZE (H100e)</th>
+                <th style={th()}>TERM</th>
+                <th style={th()}>$/HR</th>
+                <th style={th()} title="total contract value: gpus × $/hr × 730 × term months. For RENEW/RENEW-½: the incremental cost of the extension only. For DEFER: full contract value at future sign date. For DECLINE: counterfactual (what the deal would have cost had we signed).">TOTAL COST</th>
+                <th style={th()} title="upfront cash at signing: upfront% × total contract value. The prepaid capital that gets tied up.">UPFRONT</th>
+                <th style={th()}>EV</th>
+                <th style={th()}>BASE-CASE EV</th>
+                <th style={th()} title="expected value per dollar of prepaid capital (upfront cash at signing) — capital efficiency of the commitment">EV / $ PREPAID</th>
+                {extraCol ? <th style={th("left")} title="which gate rejected this deal">WHY DECLINED</th> : <th style={th("center")}></th>}
+              </tr></thead>
+            );
+            const renderRow = (r, showWhy) => {
+              const price = r.rate || r.deal?.rate || 0;
+              const baseEV = r.perScenario?.base?.profit ?? 0;
+              const vendorName = r.vendor?.name || r.deal?.provider || "—";
+              const term = r.termMo || r.deal?.termMo || 0;
+              const canApply = btnLabel[r.action] != null;
+              let totalCost = 0, upfrontCost = 0, costIsCounterfactual = false;
+              if (r.action === "sign" || r.action === "ladder" || r.action === "defer") {
+                totalCost = (r.gpus || 0) * (r.rate || 0) * HRS_MO * (r.termMo || 0);
+                upfrontCost = r.prepaid || 0;
+              } else if ((r.action === "renew" || r.action === "renew-partial") && r.deal) {
+                const extendMo = r.action === "renew" ? (r.deal.termMo || 24) : Math.max(6, Math.round((r.deal.termMo || 24) * 0.5));
+                totalCost = (r.deal.gpus || 0) * (r.deal.rate || 0) * HRS_MO * extendMo;
+                upfrontCost = ((r.deal.upfrontPct || 0) / 100) * totalCost;
+              } else if (r.action === "decline") {
+                totalCost = (r.gpus || 0) * (r.rate || 0) * HRS_MO * (r.termMo || 0);
+                upfrontCost = r.prepaid || 0;
+                costIsCounterfactual = true;
+              }
+              const costColor = costIsCounterfactual ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.7)";
+              const upfrontColor = costIsCounterfactual ? "rgba(255,255,255,0.3)" : (upfrontCost > 0 ? AMB : "rgba(255,255,255,0.35)");
+              const timingColor = r.action === "defer" ? "#a78bfa" : r.action === "ladder" ? "#67e8f9" : r.action === "sign" ? "#6ee7b7" : "rgba(255,255,255,0.5)";
+              return (
+                <tr key={r.id}>
+                  <td style={td({ color: actColor[r.action] || "#e2e8f0", fontWeight: 700, letterSpacing: "0.05em", fontSize: 9.5, textTransform: "uppercase" })}>{r.action}</td>
+                  <td style={td({ color: timingColor, whiteSpace: "nowrap", fontSize: 9.5, fontWeight: 600 })} title={r.trigger || ""}>{timingLabel(r)}</td>
+                  <td style={td({ color: "#e2e8f0", whiteSpace: "nowrap", fontSize: 10.5 })}>
+                    <CmaxBadge provider={vendorName} dot />{vendorName}
+                  </td>
+                  <td style={td({ color: "#e2e8f0", whiteSpace: "nowrap" })}>
+                    <span style={{ fontWeight: 600 }}>{SUPPLY_GPUS[r.gpu]?.label.split(" ")[0] || r.gpu}</span>
+                    <span style={{ color: "rgba(255,255,255,0.4)", fontSize: 9.5 }}> · {r.fab} · {r.region}</span>
+                  </td>
+                  <td style={td({ textAlign: "right", color: AMB, fontWeight: 600 })}>{fmtBig(Math.round(r.targetH100e))}</td>
+                  <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{term > 0 ? term + "mo" : "—"}</td>
+                  <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{price > 0 ? fmtUSD(price, 2) : "—"}</td>
+                  <td style={td({ textAlign: "right", color: costColor })} title={costIsCounterfactual ? "counterfactual — deal was declined; this is what it would have cost" : (r.action === "renew" || r.action === "renew-partial" ? "incremental cost of the extension" : "")}>{totalCost > 0 ? fmtUSD(totalCost) : "—"}</td>
+                  <td style={td({ textAlign: "right", color: upfrontColor, fontWeight: upfrontCost > 0 && !costIsCounterfactual ? 600 : 400 })} title={costIsCounterfactual ? "counterfactual upfront" : "prepaid cash at signing"}>{totalCost > 0 ? (upfrontCost > 0 ? fmtUSD(upfrontCost) : "$0") : "—"}</td>
+                  <td style={td({ textAlign: "right", color: (r.EV || 0) >= 0 ? "#6ee7b7" : "#f87171" })}>{r.EV != null ? ((r.EV >= 0 ? "+" : "−") + fmtUSD(Math.abs(r.EV))) : "—"}</td>
+                  <td style={td({ textAlign: "right", color: baseEV >= 0 ? "#e2e8f0" : "#f87171" })}>{r.perScenario ? ((baseEV >= 0 ? "+" : "−") + fmtUSD(Math.abs(baseEV))) : "—"}</td>
+                  <td style={td({ textAlign: "right", color: (r.evPerDollar || 0) > 0 ? "#6ee7b7" : "rgba(255,255,255,0.45)", fontWeight: 600 })}>{r.evPerDollar ? (r.evPerDollar >= 0 ? "+" : "") + r.evPerDollar.toFixed(2) + "×" : "—"}</td>
+                  {showWhy ? (
+                    <td style={td({ color: "#f87171", fontSize: 9, lineHeight: 1.35, maxWidth: 260 })} title={r.declineReason || ""}>{r.declineReason || "—"}</td>
+                  ) : (
+                    <td style={td({ textAlign: "center" })}>
+                      {canApply ? (
+                        <button onClick={() => applyRec(r)} title={r.trigger || ""} style={{ background: `${actColor[r.action]}12`, border: `1px solid ${actColor[r.action]}55`, color: actColor[r.action], borderRadius: 4, fontSize: 8.5, fontFamily: F, letterSpacing: "0.06em", padding: "3px 8px", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 700 }}>{btnLabel[r.action]}</button>
+                      ) : <span style={{ color: "rgba(255,255,255,0.25)", fontSize: 9 }}>—</span>}
+                    </td>
+                  )}
+                </tr>
+              );
+            };
             return (
               <>
                 <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 560, border: "1px solid rgba(255,255,255,0.04)", borderRadius: 4 }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
-                    <thead style={{ position: "sticky", top: 0, background: "#0f172a", zIndex: 1 }}><tr>
-                      <th style={th("left")}>ACTION</th>
-                      <th style={th("left")}>VENDOR</th>
-                      <th style={th("left")}>GPU · FABRIC · REGION</th>
-                      <th style={th()}>SIZE (H100e)</th>
-                      <th style={th()}>TERM</th>
-                      <th style={th()}>$/HR</th>
-                      <th style={th()}>EV</th>
-                      <th style={th()}>BASE-CASE EV</th>
-                      <th style={th()} title="expected value per dollar of prepaid capital (upfront cash at signing) — capital efficiency of the commitment">EV / $ PREPAID</th>
-                      <th style={th("center")}></th>
-                    </tr></thead>
+                    {renderHead(false)}
                     <tbody>
-                      {rows.map(r => {
-                        const price = r.rate || r.deal?.rate || 0;
-                        const baseEV = r.perScenario?.base?.profit ?? 0;
-                        const vendorName = r.vendor?.name || r.deal?.provider || "—";
-                        const term = r.termMo || r.deal?.termMo || 0;
-                        const canApply = btnLabel[r.action] != null;
-                        return (
-                          <tr key={r.id}>
-                            <td style={td({ color: actColor[r.action] || "#e2e8f0", fontWeight: 700, letterSpacing: "0.05em", fontSize: 9.5, textTransform: "uppercase" })}>{r.action}</td>
-                            <td style={td({ color: "#e2e8f0", whiteSpace: "nowrap", fontSize: 10.5 })}>
-                              <CmaxBadge provider={vendorName} dot />{vendorName}
-                            </td>
-                            <td style={td({ color: "#e2e8f0", whiteSpace: "nowrap" })}>
-                              <span style={{ fontWeight: 600 }}>{SUPPLY_GPUS[r.gpu]?.label.split(" ")[0] || r.gpu}</span>
-                              <span style={{ color: "rgba(255,255,255,0.4)", fontSize: 9.5 }}> · {r.fab} · {r.region}</span>
-                            </td>
-                            <td style={td({ textAlign: "right", color: AMB, fontWeight: 600 })}>{fmtBig(Math.round(r.targetH100e))}</td>
-                            <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{term > 0 ? term + "mo" : "—"}</td>
-                            <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{price > 0 ? fmtUSD(price, 2) : "—"}</td>
-                            <td style={td({ textAlign: "right", color: (r.EV || 0) >= 0 ? "#6ee7b7" : "#f87171" })}>{r.EV != null ? ((r.EV >= 0 ? "+" : "−") + fmtUSD(Math.abs(r.EV))) : "—"}</td>
-                            <td style={td({ textAlign: "right", color: baseEV >= 0 ? "#e2e8f0" : "#f87171" })}>{r.perScenario ? ((baseEV >= 0 ? "+" : "−") + fmtUSD(Math.abs(baseEV))) : "—"}</td>
-                            <td style={td({ textAlign: "right", color: (r.evPerDollar || 0) > 0 ? "#6ee7b7" : "rgba(255,255,255,0.45)", fontWeight: 600 })}>{r.evPerDollar ? (r.evPerDollar >= 0 ? "+" : "") + r.evPerDollar.toFixed(2) + "×" : "—"}</td>
-                            <td style={td({ textAlign: "center" })}>
-                              {canApply ? (
-                                <button onClick={() => applyRec(r)} title={r.trigger || ""} style={{ background: `${actColor[r.action]}12`, border: `1px solid ${actColor[r.action]}55`, color: actColor[r.action], borderRadius: 4, fontSize: 8.5, fontFamily: F, letterSpacing: "0.06em", padding: "3px 8px", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 700 }}>{btnLabel[r.action]}</button>
-                              ) : <span style={{ color: "rgba(255,255,255,0.25)", fontSize: 9 }}>—</span>}
-                            </td>
-                          </tr>
-                        );
-                      })}
+                      {activeRows.length > 0 ? activeRows.map(r => renderRow(r, false)) : (
+                        <tr><td colSpan={13} style={{ padding: "14px 10px", fontSize: 10, color: "rgba(255,255,255,0.4)", textAlign: "center", fontStyle: "italic" }}>No actionable recommendations — every candidate either declined or the book already covers demand. Expand the panel below to see rejected candidates and why.</td></tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
+                {declinedRows.length > 0 && (
+                  <details style={{ marginTop: 8, border: "1px solid rgba(255,255,255,0.04)", borderRadius: 4 }}>
+                    <summary style={{ cursor: "pointer", padding: "8px 10px", fontSize: 10.5, fontFamily: F, color: "rgba(255,255,255,0.55)", background: "rgba(255,255,255,0.02)", userSelect: "none" }}>
+                      ▸ <b style={{ color: "#f87171" }}>{declinedRows.length}</b> declined candidate{declinedRows.length === 1 ? "" : "s"} — click to expand (shows which gate rejected each; useful for auditing "why nothing here" when tuning sliders)
+                    </summary>
+                    <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 400, borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
+                        {renderHead(true)}
+                        <tbody>{declinedRows.map(r => renderRow(r, true))}</tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
                 <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.4)", marginTop: 10, lineHeight: 1.65 }}>
-                  <b style={{ color: "#e2e8f0" }}>What each row is:</b> a concrete deal action the engine wants you to take on one supply bucket. Actions come in five flavors, sorted top-to-bottom in that priority:
+                  <b style={{ color: "#e2e8f0" }}>What each row is:</b> a concrete deal action the engine wants you to take on one supply bucket. Actions come in six flavors, sorted top-to-bottom in that priority:
                   <br/>
                   <span style={{ color: "#6ee7b7", fontWeight: 700 }}>SIGN</span> — commit today to the safe floor (sized to WEAK demand at the reference window; utilizes fully in every scenario).
                   {" "}<span style={{ color: "#67e8f9", fontWeight: 700 }}>LADDER</span> — a conditional commitment: don't sign now, but if actuals-to-date at month 6 confirm the base trajectory, THEN sign the increment above the safe floor (up to the fractile-implied commit level).
+                  {" "}<span style={{ color: "#a78bfa", fontWeight: 700 }}>DEFER</span> — an otherwise-clean SIGN/LADDER that breaches the total-spend cap TODAY, but fits at a specific future month once existing positions roll off enough to free the headroom. SIGN DATE column shows when. Deal economics unchanged (same term, rate, size) — you're just waiting for balance-sheet room.
                   {" "}<span style={{ color: "#6ee7b7", fontWeight: 700 }}>RENEW</span> / <span style={{ color: AMB, fontWeight: 700 }}>RENEW-PARTIAL</span> — an existing position expires inside the 24-month horizon and weak/base demand still supports keeping it (full or half term).
                   {" "}<span style={{ color: "rgba(255,255,255,0.55)", fontWeight: 700 }}>LAPSE</span> — an existing position expires and there isn't enough demand to justify renewing.
-                  {" "}<span style={{ color: "#f87171", fontWeight: 700 }}>DECLINE</span> — the engine considered a deal but rejected it (see gates below).
+                  {" "}<span style={{ color: "#f87171", fontWeight: 700 }}>DECLINE</span> — the engine considered a deal and rejected it outright (see gates below).
                   <br/><br/>
                   <b style={{ color: "#e2e8f0" }}>How to read the numbers:</b>
                   <ul style={{ margin: "4px 0 4px 20px", padding: 0, lineHeight: 1.6 }}>
-                    <li><b>SIZE</b> = H100-equivalent capacity of the candidate. <b>TERM</b> = commitment length in months. <b>$/HR</b> = the offered rate per physical GPU-hour.</li>
+                    <li><b>SIGN DATE</b> = when the deal actually gets signed. <span style={{ color: "#6ee7b7" }}>now</span> for SIGN; <span style={{ color: "#67e8f9" }}>mo 6 (trigger)</span> for LADDER; <span style={{ color: "#a78bfa" }}>mo N</span> for DEFER — the earliest month where existing-book obligation drops enough to admit the deal under the ${totalSpendCapM.toLocaleString()}M spend cap, with earlier defers in this pass layered on top so later ones push further out. <b>SIZE</b> = H100-equivalent capacity of the candidate. <b>TERM</b> = commitment length in months from the sign date. <b>$/HR</b> = the offered rate per physical GPU-hour.</li>
+                    <li><b>TOTAL COST</b> = full contract value paid upstream over the term (gpus × $/hr × 730 × term). For RENEW / RENEW-½ it's the incremental cost of the extension only. For DEFER it's the full contract value at the future sign date. For DECLINE it's counterfactual (muted) — the deal wasn't signed. <b>UPFRONT</b> = prepaid cash at signing (upfront% × total cost) — the capital that actually gets tied up.</li>
                     <li><b>EV</b> = probability-weighted expected profit over the deal's term. Σ P(s) × profit_s across weak/base/strong. The priors P(s) are set on the Compute Demand tab next to the scenario toggle.</li>
                     <li><b>BASE-CASE EV</b> = the profit this deal delivers if the base scenario actually plays out. It's the "central expectation" version of EV; usually higher than EV because the weak scenario drags the probability-weighted average down.</li>
                     <li><b>EV / $ PREPAID</b> = expected profit per dollar of upfront cash committed at signing. The primary ranking metric — measures how efficiently each locked-up dollar buys future profit. A 2× value means each $ of prepay is expected to return $2 of profit over the term.</li>
                   </ul>
-                  <b style={{ color: "#e2e8f0" }}>Why a candidate flips to DECLINE:</b> a SIGN candidate must clear its weak-case margin gate (positive margin at weak-case utilization — solvency floor, not merely lower EV). A LADDER candidate must clear its base-case margin gate (positive margin at base-case util — the trigger already neutralizes weak-tail risk). Either can also be blocked by a book-level guardrail: {'>'}40% vendor concentration once the projected book exceeds 2,000 GPUs, cumulative prepaid capital ≥ {prepaidCapPct}% of ARR, Bronze operator prepaid ≥ 10% of ARR, or plain Ethernet on a non-inference chip. The engine is not obliged to fill every gap — DECLINE is a peer option, not a fallback (an optimizer forced to fill every gap overpays in tight markets).
+                  <b style={{ color: "#e2e8f0" }}>Why a candidate flips to DEFER vs DECLINE:</b> if a SIGN or LADDER passes every gate EXCEPT the total-spend cap, the engine tries to defer — searching month-by-month for the earliest sign date where existing-book obligation has rolled off enough to fit the new deal under the cap. If a feasible month exists within 24 months → DEFER (informational — no book action taken, you revisit at that date). If not, or if any OTHER gate trips ({'>'}40% vendor concentration once the projected book exceeds 2,000 GPUs, cumulative prepaid capital ≥ {prepaidCapPct}% of ARR, Bronze operator prepaid ≥ 10% of ARR, plain Ethernet on a non-inference chip, or the deal fails its own margin gate — SIGN at weak-case, LADDER at base-case) → DECLINE. The engine is not obliged to fill every gap — DEFER and DECLINE are peer options, not fallbacks (an optimizer forced to fill every gap overpays in tight markets).
                   <br/><br/>
-                  <b style={{ color: "#e2e8f0" }}>The button at the far right</b> applies the recommendation directly to your supply book above: ADD TO BOOK / ADD (TRIGGER) creates a new active reserved deal from the vendor spec; EXTEND / EXTEND ½ adds a full or half term to an existing position's remaining months; REMOVE deletes a lapsed position.
+                  <b style={{ color: "#e2e8f0" }}>The button at the far right</b> applies the recommendation directly to your supply book above: ADD TO BOOK / ADD (TRIGGER) creates a new active reserved deal from the vendor spec; EXTEND / EXTEND ½ adds a full or half term to an existing position's remaining months; REMOVE deletes a lapsed position. DEFER and DECLINE are read-only — no book change, you act on DEFER manually when the sign date arrives.
                 </div>
               </>
             );
@@ -3604,6 +3793,7 @@ const ENTRANT_CHECKLIST = [
     "Performance claims traceable: MLPerf division (closed = apples-to-apples, open ≠ ), software stack = my deploy version, and MFU (not HFU) — ~35–50% is real dense-training",
   ]},
   { stage: "3 · Interconnect & topology", items: [
+    "Match fabric to workload's parallelism strategy — TP/SP need intra-node NVLink; PP tolerates cross-node IB; MoE all-to-all requires rail-aligned, low-oversubscription bisection (see parallelism → fabric table below)",
     "Scale-up: NVLink generation + domain size (8-GPU HGX vs NVL72), with a real crossbar switch chip (no switch chip = ring, not fully-connected)",
     "Scale-out fabric: InfiniBand NDR/XDR vs Spectrum-X vs RoCE vs plain Ethernet",
     "Oversubscription ratio per tier (1:1 = non-blocking) + rail alignment — the cheapest place a vendor cuts cost; 2-tier or 3-tier at your scale?",
@@ -3709,7 +3899,7 @@ function App() {
       <div style={{ maxWidth: 1240, margin: "0 auto" }}>
 
         <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>Vendor Spec <span style={{ color: "#fbbf24" }}>— compare GPU cloud vendor offerings</span></div>
+          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>Vendor Spec & Contracts <span style={{ color: "#fbbf24" }}>— compare GPU cloud vendor offerings</span></div>
           <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginTop: 3 }}>
             The pre-sourcing catalog: two vendors selling "the same H100" can differ on node interconnect, scale-out fabric, region, and operator quality. Filter the catalog, then select up to 4 rows to compare side by side.
           </div>
@@ -4003,6 +4193,11 @@ function App() {
 
         {/* 4 — Workload → parallelism → fabric */}
         <Section title="Workload → parallelism → fabric — for the researcher conversation" style={{ marginBottom: 12 }}>
+          <div style={{ padding: "10px 12px", background: "rgba(167,139,250,0.05)", border: "1px solid rgba(167,139,250,0.18)", borderRadius: 4, marginBottom: 10, fontSize: 10.5, lineHeight: 1.6, color: "rgba(255,255,255,0.75)" }}>
+            <b style={{ color: VI }}>Why this belongs on the vendor conversation, not the internal engineering one.</b> Parallelism itself (DP · TP · PP · MoE · SP) is software — your ML engineers pick it based on model size, sequence length, memory budget, and target latency. The vendor never touches the framework. But every parallelism strategy has a distinct <em>communication pattern</em>, and those patterns dictate the <em>hardware</em> the cluster must provide: intra-node NVLink bandwidth, cross-node fabric BW/latency, oversubscription ratio, rail alignment. The vendor sells you that hardware. Two nominally identical H100 clusters can silently diverge in goodput because one has NVL72 + rail-aligned 400G IB and the other has 8×H100 PCIe boxes on standard Ethernet — the second one <b style={{ color: "#f87171" }}>can't run TP at all</b> and any MoE workload on it will strand from all-to-all congestion. You need enough fluency to translate "we'll run TP=8 + MoE cross-node" into concrete network specs so the vendor can quote them (and so you can push back when they quote you an oversubscribed cluster).
+            <br/><br/>
+            <b style={{ color: "#e2e8f0" }}>The three-step flow:</b> <b style={{ color: "#86efac" }}>(1)</b> talk to researchers → identify parallelism strategies for your workloads &nbsp;→&nbsp; <b style={{ color: "#fbbf24" }}>(2)</b> use this table → derive the fabric specs those strategies demand &nbsp;→&nbsp; <b style={{ color: "#67e8f9" }}>(3)</b> vendor conversation → "quote a cluster that meets these specs, and here's how we'll test it at acceptance."
+          </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
               <thead><tr>
@@ -4010,12 +4205,13 @@ function App() {
               </tr></thead>
               <tbody>
                 {[
-                  ["Data parallel (DP)", "Batch across full-model replicas", "Gradient all-reduce, once per step", "Fabric-tolerant — hides behind backward pass"],
-                  ["Tensor parallel (TP)", "One layer's weight matrix across GPUs", "All-reduce inside every layer, on critical path", "MUST stay inside NVLink domain"],
-                  ["Pipeline parallel (PP)", "Model by depth; each GPU owns a layer block", "Activations at stage boundary only", "Tolerates fabric latency; watch pipeline bubbles"],
-                  ["Expert parallel (MoE)", "Router sends each token to 1–2 experts on different GPUs", "Bursty, uneven per-token all-to-all", "Tail-latency-sensitive; load balancing is the hard part"],
-                  ["Sequence parallel (SP)", "One long sequence split by token position", "Attention exchange across the split", "Paired with TP in the same NVLink domain"],
-                  ["Inference — decode", "Single stream, one token at a time", "Re-reads full KV cache + weights per step", "Memory-bandwidth-bound; NVLink for TP serving"],
+                  ["Data parallel (DP / FSDP / ZeRO)", "Batch across full-model replicas (weights sharded across replicas in FSDP/ZeRO-3)", "Gradient all-reduce, once per step — hides behind backward compute", "Most forgiving. Standard Ethernet often OK; ≥100 GbE for large models. If you're only doing DP you can save on fabric."],
+                  ["Tensor parallel (TP)", "One layer's weight matrix (columns or rows) across GPUs", "All-reduce every layer, forward AND backward — on the critical path", "MUST stay intra-node on NVLink (SXM ≥900 GB/s / NVL72 ≥1.8 TB/s). PCIe boxes or cross-node = will not achieve theoretical throughput. Ask: NVLink BW per GPU, NVLink domain size (8 / 72)."],
+                  ["Pipeline parallel (PP)", "Model by depth; each GPU owns a contiguous layer block", "Point-to-point activation sends at stage boundaries; latency-sensitive due to bubbles", "InfiniBand cross-node is fine (NDR 400 Gbps per GPU baseline for large models). Latency matters more than bandwidth — high hop-count topologies hurt. Ask: per-GPU cross-node BW, switch hop count end-to-end."],
+                  ["Expert parallel (MoE)", "Router sends each token to top-k experts sharded across GPUs (typically 8–64 experts)", "All-to-all TWICE per layer (dispatch + combine). Uneven per-token load, bursty.", "Brutal. Needs full-bisection non-blocking fabric, RAIL-ALIGNED topology (each GPU's NIC → dedicated switch plane), oversubscription ≤2:1 (ideally 1:1). Oversubscribed or non-rail-aligned = MoE dies from congestion, not compute. Ask: bisection BW, oversubscription ratio, rail alignment (yes/no)."],
+                  ["Sequence parallel (SP)", "One long sequence split by token position, paired with TP", "All-gather across the sequence dim for attention", "Same intra-node NVLink demand as TP; long-context (128K+) amplifies it. Ask: same as TP."],
+                  ["Inference — prefill", "Long input processed in one shot (FLOPs-bound)", "Similar to training — TP inside NVLink, DP across", "FLOPs-heavy → compute-bound. Fabric like training-TP."],
+                  ["Inference — decode", "Single stream, one token at a time (BW-bound)", "Re-reads full KV cache + weights per step; TP all-reduce per layer if sharded", "Memory-BW-bound (HBM BW is the ceiling). If serving with TP shard, NVLink required. HBM capacity limits max batch size."],
                 ].map(r => (
                   <tr key={r[0]}>
                     <td style={td({ color: "#e2e8f0", fontWeight: 600 })}>{r[0]}</td>
@@ -4027,7 +4223,18 @@ function App() {
               </tbody>
             </table>
           </div>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 6, lineHeight: 1.6 }}>
+          <div style={{ marginTop: 10, padding: "10px 12px", background: "rgba(103,232,249,0.04)", border: "1px solid rgba(103,232,249,0.15)", borderRadius: 4, fontSize: 10.5, lineHeight: 1.65, color: "rgba(255,255,255,0.75)" }}>
+            <b style={{ color: "#67e8f9" }}>Vendor questions this table arms you to ask</b> — pick from these based on which parallelism strategies your workloads use. Every one has a right answer you can score against.
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "rgba(255,255,255,0.65)" }}>
+              <li><b style={{ color: "#e2e8f0" }}>Intra-node:</b> "What's the NVLink domain size (8-GPU HGX, 72-GPU NVL72, or PCIe-only)? Per-GPU NVLink bandwidth in GB/s? Any partitioning that fragments the domain (MIG, vGPU)?" — TP and SP are dead without NVLink.</li>
+              <li><b style={{ color: "#e2e8f0" }}>Cross-node:</b> "InfiniBand generation (NDR / XDR) and per-GPU cross-node bandwidth? Ethernet or IB? Per-GPU rate in Gbps (400 baseline / 800 next-gen)?" — PP over Ethernet is inference-only territory.</li>
+              <li><b style={{ color: "#e2e8f0" }}>Topology:</b> "Fat-tree bisection ratio? Oversubscription at each tier (leaf, spine)? Number of switch hops end-to-end?" — MoE dies if this isn't 1:1 or 2:1.</li>
+              <li><b style={{ color: "#e2e8f0" }}>Rail alignment:</b> "Is the fabric rail-aligned — each GPU's NIC has a dedicated switch plane? Or is it a shared / partially-shared fabric?" — the single question that most vendors don't volunteer and that most determines MoE / all-to-all goodput.</li>
+              <li><b style={{ color: "#e2e8f0" }}>Acceptance test:</b> "Will you commit to running <em>my</em> NCCL all-reduce, all-to-all, and end-to-end MFU benchmark at handover, at target message sizes? What's the minimum result you'll cure to?" — never sign without this.</li>
+              <li><b style={{ color: "#e2e8f0" }}>Fleet homogeneity:</b> "Firmware / NCCL / driver version pinning across the fleet? Are all nodes the same hardware SKU?" — a mixed fleet destroys collective performance because slowest node paces the group.</li>
+            </ul>
+          </div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 8, lineHeight: 1.6 }}>
             Translate a researcher's ask ("400B dense", "70B decode at 100 QPS with 8K context", "MoE 8-expert top-2", "128K sequence fine-tune") into the parallelism split, its comm pattern, and the fabric requirement that follows. The fabric column is where two nominally identical clusters silently diverge in goodput.
           </div>
           <details style={{ marginTop: 10, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 10 }}>
@@ -4849,34 +5056,34 @@ function InstructionsApp() {
     {
       n: "04",
       title: "Vet Vendors & Price Hardware",
-      tabs: ["Vendor Spec"],
+      tabs: ["Vendor Spec & Contracts"],
       color: AMB,
       question: "Who do we buy from, and what is a fair price for each GPU spec?",
-      answer: "Cross-check vendor catalogs (GPU type, fabric, config, price), fit a sign-constrained ridge regression for a \"fair\" price benchmark, and score prospective vendors against an 8-part diligence framework.",
+      answer: "Cross-check vendor catalogs (GPU type, fabric, config, price), fit a sign-constrained ridge regression for a \"fair\" price benchmark, and score prospective vendors against an 8-part diligence framework that highlights key negotiating points for the contract-signing process.",
     },
     {
       n: "05",
-      title: "Optimize the Purchase Plan",
-      tabs: ["Compute Supply", "→ Supply Filling Engine"],
-      color: CYAN,
-      question: "Which GPUs, how many, from which vendors — under what risk limits?",
-      answer: "Supply Filling Engine's optimization pass maximizes expected profit subject to portfolio guardrails (vendor concentration, cash-prepay caps, DC-tier limits, total-spend cap on committed contract value). Emits a ranked buy list with quantity, vendor, and timing.",
-    },
-    {
-      n: "06",
       title: "Read the Market Context",
       tabs: ["Supply Chain Bottlenecks"],
       color: RO,
       question: "How long will aggregate compute supply stay constrained — buy now, or wait?",
-      answer: "Zooms out from our own book to the whole semiconductor stack (wafers → packaging → HBM → GPUs → systems → data centers), with the choke points marked. Structural, multi-year bottlenecks → GPU rental prices keep climbing, lock in now; loosening bottlenecks → be patient before signing take-or-pay. Shapes the timing on the next step and the aggressiveness on step 05.",
+      answer: "Zooms out from our book to the full semiconductor stack (wafers → packaging → HBM → GPUs → systems → DC), marking the pacing chokepoints. Structural bottlenecks → lock in now; loosening → wait before signing take-or-pay.",
     },
     {
-      n: "07",
+      n: "06",
       title: "Time the Generation Switch",
       tabs: ["Future Supply"],
       color: VIO,
       question: "Buy long-term on current-gen now, or bridge short-term until next-gen chips land?",
-      answer: "Prices every \"bridge n years on current-gen, then switch\" strategy under a two-regime price path and maturity-ramped speedup. Inverts to break-even Λ*(n) — the next-gen unit cost that would justify each bridge length, expressed in prices you can quote today.",
+      answer: "Prices every \"bridge n years on current-gen, then switch\" strategy under a two-regime price path and maturity-ramped speedup. Inverts to the break-even next-gen unit cost that would justify each bridge length, expressed in prices you can quote today.",
+    },
+    {
+      n: "07",
+      title: "Optimize the Purchase Plan",
+      tabs: ["Compute Supply", "→ Supply Filling Engine"],
+      color: CYAN,
+      question: "Which GPUs, how many, from which vendors, at what term — under what risk limits?",
+      answer: "Supply Filling Engine's optimization pass maximizes expected profit subject to portfolio guardrails (vendor concentration, cash-prepay caps, DC-tier limits, total-spend cap on committed contract value). Emits a ranked buy list with quantity, vendor, and timing.",
     },
   ];
 
@@ -5732,18 +5939,22 @@ function TemporalApp() {
           <Eq>{String.raw`A(n,\,r) \;=\; \sum_{y=1}^{n} (1+r)^{-y} \;=\; \dfrac{1 \,-\, (1+r)^{-n}}{r}`}</Eq>
           <div>Sanity check: A(0, r) = 0. ✓ &nbsp; A(∞, r) = 1/r. ✓ Over horizon N, a bridge strategy runs current gen for years 1..n, then next gen for years n+1..N. Combining the two phases:</div>
           <Eq>{String.raw`\text{PV}(n) \;=\; P_{\text{curr}}(n) \cdot H_0 \cdot A(n,\,r) \;+\; P_{\text{next}}(n) \cdot H_0 \cdot \!\!\!\sum_{y=n+1}^{N}\!\! \dfrac{(1+r)^{-y}}{\sigma(y)}`}</Eq>
-          <div>The tail is <em>integrated over σ(y)</em> — contract price P_next is locked at switch time n, but realized speedup keeps improving year-by-year with software maturity after the switch. The docx's cleaner form <Eq>{String.raw`\text{PV}(n) \;=\; P_{\text{curr}}(n) \cdot H_0 \cdot A(n,\,r) \;+\; \dfrac{P_{\text{next}}(n)}{\sigma(n)} \cdot H_0 \cdot \bigl[\,A(N,\,r) \,-\, A(n,\,r)\,\bigr]`}</Eq> is what you get if σ is treated as time-invariant. With a maturity ramp, that shortcut systematically over-penalizes early bridges — it makes you pay year-1 immature σ for year-4 mature workloads.</div>
+          <div>The tail is <em>integrated over σ(y)</em> — contract price P<sub>next</sub> is locked at switch time n, but realized speedup keeps improving year-by-year with software maturity after the switch (step 3 defines σ(y) as σ<sub>∞</sub> · m(y)). The time-invariant shortcut <Eq>{String.raw`\text{PV}(n) \;=\; P_{\text{curr}}(n) \cdot H_0 \cdot A(n,\,r) \;+\; \dfrac{P_{\text{next}}(n)}{\sigma(n)} \cdot H_0 \cdot \bigl[\,A(N,\,r) \,-\, A(n,\,r)\,\bigr]`}</Eq> is what you get if σ is treated as constant after the switch. With a maturity ramp, that shortcut systematically over-penalizes early bridges — it makes you pay year-1 immature σ for year-4 mature workloads.</div>
           <div>Since H<sub>0</sub> multiplies every strategy identically, it drops out of any comparison. The optimal strategy is scale-invariant — same answer for 64 GPUs as for 6,400. Useful when you're arguing with a CFO who thinks the answer changes with deal size.</div>
         </>
       ),
     },
     {
-      title: "Price dynamics & boundary cases",
+      title: "Price & speedup trajectories, with boundary cases",
       body: (
         <>
-          <div>Next-gen silicon launches at a scarcity premium that decays as supply normalizes. If it becomes available in year t<sub>L</sub> at launch price P<sub>L</sub>, decaying at rate δ per year:</div>
-          <Eq>{String.raw`P_{\text{next}}(t) \;=\; P_L \cdot e^{-\delta\,(t - t_L)}`}</Eq>
-          <div>This is why PV(n) isn't monotone in n — bridging longer costs you time on slower hardware but buys you a cheaper entry price on the new one. Three sanity-check boundaries:</div>
+          <div><b style={{ color: "#e2e8f0" }}>Two-regime pricing.</b> Next-gen silicon launches at a scarcity premium that in supply-constrained markets keeps appreciating before it decays — a single exponential decay from t<sub>L</sub> is too clean. Model P<sub>next</sub>(t) as inflating at rate g through normalization time t<sup>★</sup>, then decaying at rate δ:</div>
+          <Eq>{String.raw`P_{\text{next}}(t) \;=\; P_L \cdot (1+g)^{\,t - t_L} \qquad\text{for } t_L \le t < t^{\!\star}`}</Eq>
+          <Eq>{String.raw`P_{\text{next}}(t) \;=\; P_L \cdot (1+g)^{\,t^{\!\star} - t_L} \cdot e^{-\delta\,(t - t^{\!\star})} \qquad\text{for } t \ge t^{\!\star}`}</Eq>
+          <div><b style={{ color: "#e2e8f0" }}>Maturity-adjusted speedup.</b> Realized σ at launch is a fraction of eventual σ — optimized frameworks lag hardware by ~2 years. Model it as σ(t) = σ<sub>∞</sub> · m(t) with m rising linearly from launch-day maturity m<sub>0</sub> to 1 over t<sub>mat</sub> years:</div>
+          <Eq>{String.raw`\sigma(t) \;=\; \sigma_\infty \cdot m(t), \qquad m(t) \;=\; \min\!\left(1,\; m_0 \,+\, (1 - m_0) \cdot \dfrac{t - t_L}{t_{\text{mat}}}\right) \quad\text{for } t \ge t_L`}</Eq>
+          <div>This is what σ(y) in step 2's PV formula actually is. Both corrections — two-regime pricing and the maturity ramp — push toward longer bridges: switching at launch buys peak price <em>and</em> immature software, so you pay the premium for performance you can't yet extract. It's also why PV(n) isn't monotone in n — bridging longer costs you time on slower hardware but buys a cheaper entry price on the new one <em>and</em> more of the maturity gain is banked before you switch.</div>
+          <div>With P<sub>next</sub>(t) and σ(t) defined, three sanity-check boundaries hold:</div>
           <ul style={{ margin: "4px 0 4px 20px", padding: 0, lineHeight: 1.7 }}>
             <li><b style={{ color: VIO }}>σ → 1:</b> no speedup, so C<sub>next</sub> = P<sub>next</sub> · H<sub>0</sub> — you're paying a premium for identical throughput; switching can only be justified by non-price factors.</li>
             <li><b style={{ color: VIO }}>σ → ∞:</b> switch as early as physically possible.</li>
@@ -5753,7 +5964,7 @@ function TemporalApp() {
       ),
     },
     {
-      title: "Decision rules — steady-state break-even & marginal test",
+      title: "Is switching worth it, and if so when? — decision rules & enumeration",
       body: (
         <>
           <div>Strip discounting (r = 0) and compare steady-state annual unit costs. Next-gen wins per unit of work iff:</div>
@@ -5762,24 +5973,17 @@ function TemporalApp() {
           <div>For picking the right bridge length, take the first difference PV(n+1) − PV(n). Bridging one more year replaces one year of next-gen cost with one year of current-gen cost, plus you get to lock in a (hopefully) lower Λ:</div>
           <Eq>{String.raw`\text{Wait one more year iff:}\quad \bigl[\Lambda(n) - \Lambda(n{+}1)\bigr] \cdot \!\!\!\sum_{y=n+2}^{N}\!\! (1+r)^{-y} \;\;>\;\; \bigl[P_{\text{curr}}(n) - \Lambda(n)\bigr] \cdot (1+r)^{-(n+1)}`}</Eq>
           <div>Two forces, explicitly opposed. Early in the horizon the tail is long and decay savings are large, so waiting wins. Late in the horizon the tail is short and the current-gen carrying cost dominates, so you stop waiting. That's the whole shape of the problem in one line.</div>
-        </>
-      ),
-    },
-    {
-      title: "Why there's no closed form — just enumerate",
-      body: (
-        <>
-          <div>You might expect to differentiate and solve for n*. You can't cleanly: P_curr is a step function read off a vendor rate card (terms come in 1/2/3/5-year buckets, not a continuum), and n is integer-valued. So:</div>
+          <div>You might expect to differentiate and solve for n*. You can't cleanly: P<sub>curr</sub> is a step function read off a vendor rate card (terms come in 1/2/3/5-year buckets, not a continuum), and n is integer-valued. So:</div>
           <Eq>{String.raw`n^{\!*} \;=\; \underset{n \,\in\, \{\lceil t_L\rceil,\; \ldots,\; N\}}{\arg\min}\; \text{PV}(n)`}</Eq>
           <div>Enumerate. The candidate set has maybe four elements. This is a feature — it means the model is trivially auditable in a spreadsheet, which matters more than elegance when someone senior is checking your work. (This is exactly what the PV-by-bridge-length bar chart above is: 6-10 candidate n's, evaluated exhaustively, argmin highlighted.)</div>
         </>
       ),
     },
     {
-      title: "Invert the problem — solve for Λ*(n)",
+      title: "What would next-gen have to cost to break even? — the break-even Λ*(n)",
       body: (
         <>
-          <div>P<sub>L</sub> and δ are forecasts, not observables. But they only enter as the quotient Λ(t) = P<sub>next</sub>(t) / σ(t). Define this as the next-gen effective price per unit of work, denominated in the same units as P<sub>curr</sub> — directly comparable.</div>
+          <div>P<sub>L</sub>, g, and δ are forecasts, not observables. But they only enter as the quotient Λ(t) = P<sub>next</sub>(t) / σ(t). Define this as the next-gen effective price per unit of work, denominated in the same units as P<sub>curr</sub> — directly comparable.</div>
           <div>Collapsing two unknowns into one isn't cosmetic. Errors are correlated in the helpful direction: a chip that lands faster than expected is almost always priced higher than expected, and vice versa. Forecasting Λ is meaningfully easier than forecasting either component, because the two mistakes partially cancel.</div>
           <div>Don't forecast Λ — solve for the value that makes you indifferent, then ask whether reality is plausibly on the far side of it. From PV(n) = PV(N):</div>
           <Eq>{String.raw`\Lambda^{\!*}(n) \;=\; \dfrac{P_{\text{curr}}(N)\cdot A(N,\,r) \;-\; P_{\text{curr}}(n)\cdot A(n,\,r)}{A(N,\,r) \;-\; A(n,\,r)}`}</Eq>
@@ -5788,16 +5992,10 @@ function TemporalApp() {
       ),
     },
     {
-      title: "Making it real — two-regime pricing, maturity ramp, workload-decomposed σ",
+      title: "Workload-decomposing σ_∞ — making the speedup auditable",
       body: (
         <>
-          <div><b style={{ color: "#e2e8f0" }}>Two-regime pricing.</b> In supply-constrained markets, contract rates for both old and new silicon can appreciate before they decay. Replace the single exponential with a regime switch at normalization time t<sup>★</sup>:</div>
-          <Eq>{String.raw`P_{\text{next}}(t) \;=\; P_L \cdot (1+g)^{\,t - t_L} \qquad\text{for } t_L \le t < t^{\!\star}`}</Eq>
-          <Eq>{String.raw`P_{\text{next}}(t) \;=\; P_L \cdot (1+g)^{\,t^{\!\star} - t_L} \cdot e^{-\delta\,(t - t^{\!\star})} \qquad\text{for } t \ge t^{\!\star}`}</Eq>
-          <div><b style={{ color: "#e2e8f0" }}>Maturity-adjusted speedup.</b> Realized σ at launch is a fraction of eventual σ — optimized frameworks lag hardware by ~2 years. Model it as σ(t) = σ<sub>∞</sub> · m(t) with m rising from m<sub>0</sub> to 1 linearly over t<sub>mat</sub> years:</div>
-          <Eq>{String.raw`m(t) \;=\; \min\!\left(1,\; m_0 \,+\, (1 - m_0) \cdot \dfrac{t - t_L}{t_{\text{mat}}}\right) \qquad\text{for } t \ge t_L`}</Eq>
-          <div>Both corrections push toward longer bridges: switching at launch buys peak price <em>and</em> immature software — you pay the premium for performance you can't yet extract.</div>
-          <div><b style={{ color: "#e2e8f0" }}>Workload-decomposed σ.</b> σ isn't a scalar, it's workload-dependent — different workloads hit different bottlenecks:</div>
+          <div>σ<sub>∞</sub> isn't a scalar the vendor hands you. It's workload-dependent — different workloads hit different bottlenecks:</div>
           <ul style={{ margin: "4px 0 4px 20px", padding: 0, lineHeight: 1.7 }}>
             <li><b style={{ color: GRW }}>Training and prefill</b> are FLOPs-bound — dense tensor throughput at matched precision. A chip without native support for the requested precision falls back to the highest precision both chips share.</li>
             <li><b style={{ color: CYAN }}>Inference decode</b> is memory-bandwidth-bound — every generated token streams model weights from HBM to registers, so aggregate HBM bandwidth is what matters, not FLOPs.</li>
@@ -5805,7 +6003,8 @@ function TemporalApp() {
           <div>Define the two regime speedups, blend by workload mix:</div>
           <Eq>{String.raw`\sigma_{\text{train}} \;=\; \dfrac{\text{TFLOPS}_{\text{next}}(p^*)}{\text{TFLOPS}_{\text{cur}}(p^*)} \qquad\quad \sigma_{\text{decode}} \;=\; \dfrac{\text{BW}_{\text{next}}}{\text{BW}_{\text{cur}}}`}</Eq>
           <Eq>{String.raw`\sigma_\infty \;=\; w_{\text{train}} \cdot \sigma_{\text{train}} \;+\; (1 - w_{\text{train}}) \cdot \sigma_{\text{decode}}`}</Eq>
-          <div>where p<sup>*</sup> is the highest precision both chips natively support and w<sub>train</sub> is pulled from your demand book (or overridden). σ<sub>∞</sub> is no longer a number the vendor hands you — it's a computation over two ratios you verify against a spec sheet, weighted by your own demand mix. The remaining wildcard is realized-vs-peak throughput (goodput), which is what the maturity ramp m(t) stands in for. If B200 quotes 4× FP4 on paper but a fresh vLLM only delivers 2× of that in month 1, that's m<sub>0</sub> = 0.5.</div>
+          <div>where p<sup>*</sup> is the highest precision both chips natively support and w<sub>train</sub> is pulled from your demand book (or overridden). σ<sub>∞</sub> becomes a computation over two ratios you verify against a spec sheet, weighted by your own demand mix — not a number the vendor hands you.</div>
+          <div>The remaining wildcard is realized-vs-peak throughput (goodput), which is what the maturity ramp m(t) in step 3 stands in for. If B200 quotes 4× FP4 on paper but a fresh vLLM only delivers 2× of that in month 1, that's m<sub>0</sub> = 0.5.</div>
         </>
       ),
     },
@@ -6687,56 +6886,60 @@ function BottlenecksApp() {
           </div>
         </div>
 
-        {/* Bottleneck monitor — the 5 pacing chokepoints and their published metrics */}
+        {/* Bottleneck monitor — the 5 pacing chokepoints, read through the leading supplier's financial signals */}
         {(() => {
           const RED = "#f87171", AMBER = "#fbbf24", GREEN = "#6ee7b7";
           const statusColor = { CRITICAL: RED, TIGHT: AMBER, EASING: GREEN, STRUCTURAL: RED };
           const thS = (align = "right") => ({ padding: "5px 8px", textAlign: align, color: "rgba(255,255,255,0.35)", borderBottom: "1px solid rgba(255,255,255,0.08)", fontSize: 9, fontWeight: 600, letterSpacing: "0.04em" });
           const tdS = (extra = {}) => ({ padding: "6px 8px", borderBottom: "1px solid rgba(255,255,255,0.03)", ...extra });
+          // Numbers below are revenue-weighted averages (rev growth, op margin)
+          // and sums (capex) across the listed companies for each segment.
+          // LTM = trailing 12 months from most recent filings; NTM = next 12
+          // months implied by segment guidance. Refresh quarterly.
           const nodes = [
-            { node: "HBM3E / HBM4", who: "SK Hynix · Samsung · Micron", lead: "40–52 wks", cap: "+75–100% YoY", status: "CRITICAL", ease: "H2 2027", src: "SK Hynix Q2'26 · Micron Q3'26 · Samsung Q2'26" },
-            { node: "CoWoS-L advanced packaging", who: "TSMC (Amkor, ASE secondary)", lead: "~52 wks", cap: "~2× by YE 2026", status: "CRITICAL", ease: "H1 2027", src: "TSMC Q2'26 call" },
-            { node: "Leading-edge foundry wafers", who: "TSMC N3 / N2 · Samsung 3nm", lead: "20–26 wks", cap: "+30% N3; N2 volume late '26", status: "TIGHT", ease: "2027", src: "TSMC Q2'26 · Samsung Foundry" },
-            { node: "ABF substrates", who: "Ibiden · Unimicron · Shinko", lead: "16–24 wks (from 30+)", cap: "+15% YoY", status: "EASING", ease: "already moderating", src: "Ibiden FY guidance" },
-            { node: "DC power & grid interconnect", who: "US/EU utilities", lead: "3–7 yr new hookup", cap: "structurally lagging", status: "STRUCTURAL", ease: "not before 2029", src: "utility ISO queues; EPRI" },
+            { node: "Memory (HBM)",         who: "SK Hynix · Samsung · Micron",   revG: "+40% → +28%", opM: "32% → 30%", capex: "$53B → $60B",  status: "CRITICAL",   ease: "H2 2027" },
+            { node: "Advanced packaging",   who: "TSMC · Amkor · ASE",            revG: "+30% → +25%", opM: "42% → 43%", capex: "$45B → $52B",  status: "CRITICAL",   ease: "H1 2027" },
+            { node: "Leading-edge foundry", who: "TSMC · Samsung",                revG: "+30% → +25%", opM: "40% → 42%", capex: "$52B → $58B",  status: "TIGHT",      ease: "2027" },
+            { node: "Substrates",           who: "Ibiden · Unimicron · Shinko",   revG: "flat → +10%", opM: "12% → 15%", capex: "$1B → $1B",    status: "EASING",     ease: "already moderating" },
+            { node: "DC power & grid",      who: "NextEra · Duke · Iberdrola · SSE", revG: "+7% → +8%", opM: "20% → 20%", capex: "$44B → $50B", status: "STRUCTURAL", ease: "not before 2029" },
           ];
           return (
             <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.10)", borderRadius: 8, padding: "12px 14px", marginBottom: 12 }}>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                  Bottleneck monitor <span style={{ color: "rgba(255,255,255,0.35)", fontWeight: 500 }}>— the 5 pacing chokepoints</span>
+                  Bottleneck monitor <span style={{ color: "rgba(255,255,255,0.35)", fontWeight: 500 }}>— the 5 pacing chokepoints, read through the leader's financials</span>
                 </div>
                 <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>Snapshot Jul 2026 · refresh quarterly from earnings</div>
               </div>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
                 <thead><tr>
                   <th style={thS("left")}>NODE</th>
-                  <th style={thS("left")}>KEY SUPPLIER(S)</th>
-                  <th style={thS()}>LEAD TIME</th>
-                  <th style={thS()}>CAP GROWTH (12mo)</th>
+                  <th style={thS("left")}>KEY COMPANIES</th>
+                  <th style={thS()} title="revenue-weighted average YoY revenue growth across listed companies: LTM (actual) → NTM (implied by segment guidance)">REV GROWTH (LTM → NTM)</th>
+                  <th style={thS()} title="revenue-weighted average operating margin across listed companies: LTM (actual) → NTM (implied by segment guidance). High margin holding or rising = pricing power intact.">OP MARGIN (LTM → NTM)</th>
+                  <th style={thS()} title="SUM of annual capex across listed companies: LTM (actual) → NTM (guided). Ramping capex = capacity coming; flat or falling = the segment is done building.">CAPEX (LTM → NTM)</th>
                   <th style={thS("left")}>STATUS</th>
                   <th style={thS("left")}>MEANINGFUL EASING</th>
-                  <th style={thS("left")}>SOURCE</th>
                 </tr></thead>
                 <tbody>
                   {nodes.map(n => (
                     <tr key={n.node}>
                       <td style={tdS({ color: "#e2e8f0", fontWeight: 600 })}>{n.node}</td>
                       <td style={tdS({ color: "rgba(255,255,255,0.55)", fontSize: 10 })}>{n.who}</td>
-                      <td style={tdS({ textAlign: "right", color: AMB })}>{n.lead}</td>
-                      <td style={tdS({ textAlign: "right", color: "rgba(255,255,255,0.6)" })}>{n.cap}</td>
+                      <td style={tdS({ textAlign: "right", color: "rgba(255,255,255,0.7)", fontSize: 10 })}>{n.revG}</td>
+                      <td style={tdS({ textAlign: "right", color: "rgba(255,255,255,0.7)", fontSize: 10 })}>{n.opM}</td>
+                      <td style={tdS({ textAlign: "right", color: "rgba(255,255,255,0.7)", fontSize: 10 })}>{n.capex}</td>
                       <td style={tdS({ color: statusColor[n.status], fontWeight: 700, fontSize: 10 })}>{n.status}</td>
                       <td style={tdS({ color: "#67e8f9", fontSize: 10 })}>{n.ease}</td>
-                      <td style={tdS({ color: "rgba(255,255,255,0.3)", fontSize: 9.5 })}>{n.src}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
               <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.55)", marginTop: 10, lineHeight: 1.6, borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: 8 }}>
-                <b style={{ color: "#e2e8f0" }}>Aggregate:</b> supply is only as tight as the weakest link — pacing constraints are <b style={{ color: RED }}>HBM + CoWoS</b>, which start meaningfully easing H2 2027 as HBM4 volume and new CoWoS fabs (AP6, AP7) ramp. Full balance across silicon nodes closer to <b style={{ color: "#e2e8f0" }}>2028</b> when N2 wafers scale. <b style={{ color: RED }}>DC power</b> is the wildcard — utility timelines don't compress and can keep effective AI-compute supply tight into 2029+ regardless of silicon availability.
+                <b style={{ color: "#e2e8f0" }}>Aggregate:</b> supply is only as tight as the weakest link — pacing constraints are <b style={{ color: RED }}>HBM + advanced packaging</b>, which start meaningfully easing H2 2027 as HBM4 volume and new CoWoS fabs (AP6, AP7) ramp. Full balance across silicon nodes closer to <b style={{ color: "#e2e8f0" }}>2028</b> when N2 wafers scale. <b style={{ color: RED }}>DC power</b> is the wildcard — utility timelines don't compress and can keep effective AI-compute supply tight into 2029+ regardless of silicon availability.
               </div>
-              <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.25)", marginTop: 6, lineHeight: 1.5 }}>
-                Method: track published quantitative signals (lead time in weeks, capacity growth guidance, utilization) from each node's dominant supplier's most recent earnings call rather than subjective 1–10 scores across all 40 companies in the tree below. The tree below shows structure; this table shows tightness. Refresh the numbers quarterly after each cycle of earnings.
+              <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.4)", marginTop: 8, lineHeight: 1.55 }}>
+                <b style={{ color: "#e2e8f0" }}>Method:</b> rev growth & op margin = rev-weighted avg across listed companies; capex = sum. LTM (actual) → NTM (segment guidance). <b style={{ color: "#e2e8f0" }}>Pattern:</b> high margin + high rev growth + still-ramping capex = undersupplied, pricing power intact; softening growth or capex pullback = constraint releasing. Utility metrics informational — grid buildout is permitting/queue-bound, not capital-bound.
               </div>
             </div>
           );
@@ -6768,7 +6971,7 @@ export default function App() {
     { key: "projections", label: "PROJECTIONS", sub: "compute outlook & financials" },
     { key: "demand", label: "COMPUTE DEMAND", sub: "demand book & run sizing" },
     { key: "supply", label: "COMPUTE SUPPLY", sub: "supply book & deal intake" },
-    { key: "vendor", label: "VENDOR SPEC", sub: "compare vendor spec sheets" },
+    { key: "vendor", label: "VENDOR SPEC & CONTRACTS", sub: "compare vendor spec sheets" },
     { key: "bottlenecks", label: "SUPPLY CHAIN BOTTLENECKS", sub: "aggregate compute-supply outlook" },
     { key: "temporal", label: "FUTURE SUPPLY", sub: "old-gen vs. new-gen upgrade timing" },
   ];
