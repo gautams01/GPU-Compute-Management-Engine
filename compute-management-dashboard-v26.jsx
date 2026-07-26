@@ -3596,25 +3596,29 @@ const ENTRANT_CHECKLIST = [
     "Verifiable DC footprint: sites, power contracts, third-party press or satellite evidence",
   ]},
   { stage: "2 · Hardware & silicon", items: [
-    "GPU model, generation, form factor (SXM vs PCIe) — and proof they physically hold them",
+    "GPU model, generation, form factor (SXM vs PCIe — same silicon, very different multi-GPU behavior) — and proof they physically hold them",
     "Quantity offered AND largest single cluster (separate sites can't shard one replica)",
-    "Precision support: FP16 / FP8 / native FP4 (Blackwell-only) matches the workloads you'll sell",
-    "Compute density (dense BF16 TFLOPs) and memory capacity (VRAM GB) per the reference tables above",
+    "Quoted FLOPS: precision named AND dense-vs-sparse disclosed? (halve if 2:4 sparse; FP4 is inference-only, not training)",
+    "Memory capacity ÷ bandwidth = time to read all memory once — did this generation improve or regress on that ratio?",
     "Memory bandwidth (TB/s) — the inference-decode driver; what H200's premium actually buys",
+    "Performance claims traceable: MLPerf division (closed = apples-to-apples, open ≠ ), software stack = my deploy version, and MFU (not HFU) — ~35–50% is real dense-training",
   ]},
   { stage: "3 · Interconnect & topology", items: [
-    "Scale-up: NVLink generation and domain size (8-GPU HGX vs NVL72 rack-scale)",
-    "Scale-out fabric: InfiniBand NDR/XDR vs Spectrum-X vs RoCE vs plain Ethernet — per the ranking above",
-    "Test-cluster access before signature: NCCL all-reduce at target scale, storage I/O throughput",
+    "Scale-up: NVLink generation + domain size (8-GPU HGX vs NVL72), with a real crossbar switch chip (no switch chip = ring, not fully-connected)",
+    "Scale-out fabric: InfiniBand NDR/XDR vs Spectrum-X vs RoCE vs plain Ethernet",
+    "Oversubscription ratio per tier (1:1 = non-blocking) + rail alignment — the cheapest place a vendor cuts cost; 2-tier or 3-tier at your scale?",
+    "Bandwidth quoted per-GPU + unidirectional (not aggregate, not the bidirectional 2× figure)",
+    "Test-cluster access before signature: NCCL all-reduce + measured end-to-end latency at target message sizes (not per-hop silicon), storage I/O throughput",
   ]},
   { stage: "4 · Facility & power", items: [
-    "Power price ($/kWh) and PUE — compute the implied power cost per GPU-hour",
-    "Cooling class: liquid cooling required at Blackwell rack densities",
+    "Power price ($/kWh) and PUE — is the quoted price/power IT load or total facility draw?",
+    "Cooling class: is the peak FLOPS number real with the cooling I'm buying? (>700W chips can't sustain boost on air)",
+    "Rack density vs existing electrical — 5–15 kW/rack halls need real retrofit for 100+ kW liquid racks",
     "Region: data residency, export-control screening, latency to core demand geographies",
   ]},
   { stage: "5 · Storage & data", items: [
     "Storage type (Lustre / VAST / WEKA / local NVMe) and whether it's included or a $/GPU-hr adder",
-    "Egress fees $/GB — the hyperscaler gotcha that moves the all-in price",
+    "Egress fees $/GB — moves the all-in price and is often omitted from the headline rate",
     "Data-loading path: bandwidth from storage to GPUs at training scale",
   ]},
   { stage: "6 · Commercial terms", items: [
@@ -3623,12 +3627,14 @@ const ENTRANT_CHECKLIST = [
     "All-in price: quoted rate + storage adder + egress, not the headline number",
     "Minimum commitment size and term length proportionate to their apparent scale",
     "Prepay % and payment terms — large prepay to a small operator concentrates default risk",
+    "Utilization assumption behind the price comparison, and whether scarcity flips this from a cost decision to an access decision",
   ]},
   { stage: "7 · Service & operations", items: [
     "SLA % with credits in writing — quoted uptime without credits is marketing",
-    "Support tier: 24/7 engineering vs business hours vs email-only",
-    "Tenancy: bare metal vs VM (virtualization overhead and noisy neighbors)",
-    "Lead time to delivery and ramp schedule with milestone payments tied to it",
+    "Support tier: 24/7 engineering vs business hours vs email-only; MTTR on a downed node mid-run",
+    "Burn-in / acceptance-test clause with walk-away rights — turns 'we were told' into 'we confirmed'",
+    "Fleet homogeneity: firmware / driver / NCCL version pinning practice (skew causes silent perf divergence)",
+    "Tenancy (bare metal vs VM), lead time, and ramp schedule with milestone payments tied to it",
   ]},
   { stage: "8 · Rights & references", items: [
     "Resale rights — decisive for marketplace supply; hyperscaler ToS generally prohibit it",
@@ -3993,6 +3999,49 @@ function App() {
           <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 6, lineHeight: 1.6 }}>
             Tiers per SemiAnalysis ClusterMAX 2.0 (84 neoclouds rated Nov 2025 on 10 criteria incl. security, orchestration, networking, reliability, support). The tier prices <em>goodput</em>, not the silicon: a Bronze cluster that loses 10–20% of wall-clock to node failures, slow storage, or fabric misconfiguration erases its discount on a serious training run, while for fault-tolerant inference fleets a cheaper tier can be the rational buy. Ratings move every cycle — verify before sourcing.
           </div>
+        </Section>
+
+        {/* 4 — Workload → parallelism → fabric */}
+        <Section title="Workload → parallelism → fabric — for the researcher conversation" style={{ marginBottom: 12 }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
+              <thead><tr>
+                <th style={th("left")}>STRATEGY</th><th style={th("left")}>WHAT'S SPLIT</th><th style={th("left")}>COMMUNICATION</th><th style={th("left")}>FABRIC REQUIREMENT</th>
+              </tr></thead>
+              <tbody>
+                {[
+                  ["Data parallel (DP)", "Batch across full-model replicas", "Gradient all-reduce, once per step", "Fabric-tolerant — hides behind backward pass"],
+                  ["Tensor parallel (TP)", "One layer's weight matrix across GPUs", "All-reduce inside every layer, on critical path", "MUST stay inside NVLink domain"],
+                  ["Pipeline parallel (PP)", "Model by depth; each GPU owns a layer block", "Activations at stage boundary only", "Tolerates fabric latency; watch pipeline bubbles"],
+                  ["Expert parallel (MoE)", "Router sends each token to 1–2 experts on different GPUs", "Bursty, uneven per-token all-to-all", "Tail-latency-sensitive; load balancing is the hard part"],
+                  ["Sequence parallel (SP)", "One long sequence split by token position", "Attention exchange across the split", "Paired with TP in the same NVLink domain"],
+                  ["Inference — decode", "Single stream, one token at a time", "Re-reads full KV cache + weights per step", "Memory-bandwidth-bound; NVLink for TP serving"],
+                ].map(r => (
+                  <tr key={r[0]}>
+                    <td style={td({ color: "#e2e8f0", fontWeight: 600 })}>{r[0]}</td>
+                    <td style={td({ color: "rgba(255,255,255,0.55)", fontSize: 10 })}>{r[1]}</td>
+                    <td style={td({ color: "rgba(255,255,255,0.55)", fontSize: 10 })}>{r[2]}</td>
+                    <td style={td({ color: "#67e8f9", fontSize: 10 })}>{r[3]}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 6, lineHeight: 1.6 }}>
+            Translate a researcher's ask ("400B dense", "70B decode at 100 QPS with 8K context", "MoE 8-expert top-2", "128K sequence fine-tune") into the parallelism split, its comm pattern, and the fabric requirement that follows. The fabric column is where two nominally identical clusters silently diverge in goodput.
+          </div>
+          <details style={{ marginTop: 10, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 10 }}>
+            <summary style={{ cursor: "pointer", fontSize: 10.5, color: VI, fontFamily: F, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, userSelect: "none", listStyle: "none" }}>
+              ▸ Show parallelism diagrams (DP · TP · PP · MoE · SP)
+            </summary>
+            <div style={{ marginTop: 10 }}>
+              <iframe
+                src="/parallelism-diagrams.html"
+                title="Parallelism strategies — visual diagrams"
+                style={{ width: "100%", height: "560px", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, background: "#0b1118", display: "block" }}
+              />
+            </div>
+          </details>
         </Section>
 
         {/* Comparison */}
@@ -6634,29 +6683,76 @@ function BottlenecksApp() {
             Supply Chain Bottlenecks <span style={{ color: AMB }}>— aggregate compute-supply outlook</span>
           </div>
           <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginTop: 3, lineHeight: 1.6, maxWidth: 1050 }}>
-            The Compute Supply tab tracks <em>our</em> book. This tab zooms out to the <em>market</em> — the full semiconductor supply chain from raw materials → wafers → packaging → HBM → GPUs → systems → data centers, with the choke points marked. Read it as the exogenous timing signal that shapes how aggressive to be on the Compute Supply and Future Supply tabs: <b style={{ color: "#e2e8f0" }}>if the bottlenecks are structural and multi-year</b> (CoWoS-L capacity, HBM3e/HBM4 allocation, leading-node wafer supply, data-center power/interconnect), aggregate GPU supply stays tight, rental rates keep climbing, and it pays to lock in reserved capacity now — even at rich prices; <b style={{ color: "#e2e8f0" }}>if they're loosening</b> (new fabs ramping, packaging capacity coming online, HBM4 volume, grid buildout catching up), spot softens and OD becomes cheap — be patient before committing take-or-pay.
+            Zooms out from <em>our</em> book (Compute Supply) to <em>market</em> supply. Structural + multi-year → <b style={{ color: "#e2e8f0" }}>lock reserved capacity now</b>. Loosening → <b style={{ color: "#e2e8f0" }}>be patient</b> before committing take-or-pay.
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 16, fontSize: 10, color: "rgba(255,255,255,0.6)", marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 12, height: 12, background: "linear-gradient(135deg,#1e40af,#1e3a8a)", border: "1px solid #3b82f6", borderRadius: 2 }} /> primary AI-relevant node
-          </span>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 12, height: 12, background: "rgba(59,130,246,0.18)", border: "1px solid #3b82f6", borderRadius: 2 }} /> secondary AI-relevant
-          </span>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 12, height: 12, background: "rgba(255,255,255,0.06)", border: "2px solid #f87171", borderRadius: 2 }} /> supply-chain bottleneck
-          </span>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 12, height: 12, background: AMB, borderRadius: 2 }} /> selected
-          </span>
-          <span style={{ color: "rgba(255,255,255,0.35)" }}>Click any node to trace its suppliers (red lines up) and customers (blue lines down).</span>
+        {/* Bottleneck monitor — the 5 pacing chokepoints and their published metrics */}
+        {(() => {
+          const RED = "#f87171", AMBER = "#fbbf24", GREEN = "#6ee7b7";
+          const statusColor = { CRITICAL: RED, TIGHT: AMBER, EASING: GREEN, STRUCTURAL: RED };
+          const thS = (align = "right") => ({ padding: "5px 8px", textAlign: align, color: "rgba(255,255,255,0.35)", borderBottom: "1px solid rgba(255,255,255,0.08)", fontSize: 9, fontWeight: 600, letterSpacing: "0.04em" });
+          const tdS = (extra = {}) => ({ padding: "6px 8px", borderBottom: "1px solid rgba(255,255,255,0.03)", ...extra });
+          const nodes = [
+            { node: "HBM3E / HBM4", who: "SK Hynix · Samsung · Micron", lead: "40–52 wks", cap: "+75–100% YoY", status: "CRITICAL", ease: "H2 2027", src: "SK Hynix Q2'26 · Micron Q3'26 · Samsung Q2'26" },
+            { node: "CoWoS-L advanced packaging", who: "TSMC (Amkor, ASE secondary)", lead: "~52 wks", cap: "~2× by YE 2026", status: "CRITICAL", ease: "H1 2027", src: "TSMC Q2'26 call" },
+            { node: "Leading-edge foundry wafers", who: "TSMC N3 / N2 · Samsung 3nm", lead: "20–26 wks", cap: "+30% N3; N2 volume late '26", status: "TIGHT", ease: "2027", src: "TSMC Q2'26 · Samsung Foundry" },
+            { node: "ABF substrates", who: "Ibiden · Unimicron · Shinko", lead: "16–24 wks (from 30+)", cap: "+15% YoY", status: "EASING", ease: "already moderating", src: "Ibiden FY guidance" },
+            { node: "DC power & grid interconnect", who: "US/EU utilities", lead: "3–7 yr new hookup", cap: "structurally lagging", status: "STRUCTURAL", ease: "not before 2029", src: "utility ISO queues; EPRI" },
+          ];
+          return (
+            <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.10)", borderRadius: 8, padding: "12px 14px", marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                  Bottleneck monitor <span style={{ color: "rgba(255,255,255,0.35)", fontWeight: 500 }}>— the 5 pacing chokepoints</span>
+                </div>
+                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>Snapshot Jul 2026 · refresh quarterly from earnings</div>
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
+                <thead><tr>
+                  <th style={thS("left")}>NODE</th>
+                  <th style={thS("left")}>KEY SUPPLIER(S)</th>
+                  <th style={thS()}>LEAD TIME</th>
+                  <th style={thS()}>CAP GROWTH (12mo)</th>
+                  <th style={thS("left")}>STATUS</th>
+                  <th style={thS("left")}>MEANINGFUL EASING</th>
+                  <th style={thS("left")}>SOURCE</th>
+                </tr></thead>
+                <tbody>
+                  {nodes.map(n => (
+                    <tr key={n.node}>
+                      <td style={tdS({ color: "#e2e8f0", fontWeight: 600 })}>{n.node}</td>
+                      <td style={tdS({ color: "rgba(255,255,255,0.55)", fontSize: 10 })}>{n.who}</td>
+                      <td style={tdS({ textAlign: "right", color: AMB })}>{n.lead}</td>
+                      <td style={tdS({ textAlign: "right", color: "rgba(255,255,255,0.6)" })}>{n.cap}</td>
+                      <td style={tdS({ color: statusColor[n.status], fontWeight: 700, fontSize: 10 })}>{n.status}</td>
+                      <td style={tdS({ color: "#67e8f9", fontSize: 10 })}>{n.ease}</td>
+                      <td style={tdS({ color: "rgba(255,255,255,0.3)", fontSize: 9.5 })}>{n.src}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.55)", marginTop: 10, lineHeight: 1.6, borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: 8 }}>
+                <b style={{ color: "#e2e8f0" }}>Aggregate:</b> supply is only as tight as the weakest link — pacing constraints are <b style={{ color: RED }}>HBM + CoWoS</b>, which start meaningfully easing H2 2027 as HBM4 volume and new CoWoS fabs (AP6, AP7) ramp. Full balance across silicon nodes closer to <b style={{ color: "#e2e8f0" }}>2028</b> when N2 wafers scale. <b style={{ color: RED }}>DC power</b> is the wildcard — utility timelines don't compress and can keep effective AI-compute supply tight into 2029+ regardless of silicon availability.
+              </div>
+              <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.25)", marginTop: 6, lineHeight: 1.5 }}>
+                Method: track published quantitative signals (lead time in weeks, capacity growth guidance, utilization) from each node's dominant supplier's most recent earnings call rather than subjective 1–10 scores across all 40 companies in the tree below. The tree below shows structure; this table shows tightness. Refresh the numbers quarterly after each cycle of earnings.
+              </div>
+            </div>
+          );
+        })()}
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "22px 0 10px" }}>
+          <div style={{ fontSize: 15, fontWeight: 700, letterSpacing: "0.02em", color: "#e2e8f0", fontFamily: F, textTransform: "uppercase" }}>Semiconductor Market Map</div>
+          <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.08)" }} />
+        </div>
+        <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.35)", marginBottom: 10, lineHeight: 1.5, maxWidth: 1050 }}>
+          Full stack around the 5 pacing nodes above. Click any node to trace suppliers (red lines up) and customers (blue lines down).
         </div>
 
         <iframe
           src="/semiconductor-tree-diagram-v16.html"
-          title="Semiconductor supply-chain tree"
+          title="Semiconductor Market Map"
           style={{ width: "100%", height: "82vh", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, background: "#0b1118", display: "block" }}
         />
       </div>
