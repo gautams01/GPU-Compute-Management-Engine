@@ -1899,7 +1899,7 @@ function App() {
   const [weakUtilFloor, setWeakUtilFloor] = useState(30);   // % — hard gate on new deals
   const [arrRunM, setArrRunM] = useState(500);              // $M ARR — capital cap denominator
   const [prepaidCapPct, setPrepaidCapPct] = useState(15);   // % of ARR — prepaid capital ceiling
-  const [totalSpendCapM, setTotalSpendCapM] = useState(1000); // $M — solvency ceiling on total committed spend
+  const [totalSpendCapM, setTotalSpendCapM] = useState(3000); // $M — solvency ceiling on total committed spend
 
   const demandBook = useBookStore(DEMAND_STORE)[0];
   const engineParams = useMemo(() => ({
