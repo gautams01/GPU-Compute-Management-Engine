@@ -33,18 +33,18 @@ Supply Filling Engine diffs projected demand against the existing book across ch
 ▼
 
 **04 — Vet Vendors & Price Hardware**
-*tab: Vendor Spec*
+*tab: Vendor Spec & Contracts*
 > "Who do we buy from, and what is a fair price for each GPU spec?"
 
-Cross-check vendor catalogs (GPU type, fabric, config, price), fit a sign-constrained ridge regression for a "fair" price benchmark, and score prospective vendors against an 8-part diligence framework.
+Cross-check vendor catalogs (GPU type, fabric, config, price), fit a sign-constrained ridge regression for a "fair" price benchmark, and score prospective vendors against an 8-part diligence framework that highlights key negotiating points for the contract-signing process. A reference guide covers GPU hardware specs, scale-up/scale-out topologies (e.g., rail-alignment, fat-trees), parallelism strategies, and data center operator rankings.
 
 ▼
 
-**05 — Optimize the Purchase Plan**
-*tab: Compute Supply → Supply Filling Engine*
-> "Which GPUs, how many, from which vendors — under what risk limits?"
+**05 — Read the Market Context**
+*tab: Supply Chain Bottlenecks*
+> "How long will aggregate compute supply stay constrained — buy now, or wait?"
 
-Supply Filling Engine's optimization pass maximizes expected profit subject to portfolio guardrails (vendor concentration, cash-prepay caps, DC-tier limits). Emits a ranked buy list with quantity, vendor, and timing.
+Zooms out from our book to the full semiconductor stack (wafers → packaging → HBM → GPUs → systems → DC), tracking ~200 companies critical to the supply chain and marking the pacing chokepoints. Structural bottlenecks → lock in now; loosening → wait before signing take-or-pay.
 
 ▼
 
@@ -52,7 +52,15 @@ Supply Filling Engine's optimization pass maximizes expected profit subject to p
 *tab: Future Supply*
 > "Buy long-term on current-gen now, or bridge short-term until next-gen chips land?"
 
-Prices every "bridge n years on current-gen, then switch" strategy under a two-regime price path and maturity-ramped speedup. Inverts to break-even Λ*(n) — the next-gen unit cost that would justify each bridge length, expressed in prices you can quote today.
+Prices every "bridge n years on current-gen, then switch" strategy under a two-regime price path and maturity-ramped speedup. Inverts to the break-even next-gen unit cost that would justify each bridge length, expressed in prices you can quote today.
+
+▼
+
+**07 — Optimize the Purchase Plan**
+*tab: Compute Supply → Supply Filling Engine*
+> "Which GPUs, how many, from which vendors, at what term — under what risk limits?"
+
+Supply Filling Engine sizes each bucket's committable capacity via the classical newsvendor model, then selects deals through a three-stage stochastic optimization with real-options structure subject to portfolio guardrails (e.g., vendor concentration, cash-prepay caps, DC-tier limits, total-spend cap). Emits a ranked buy list with quantity, vendor, term, and timing.
 
 ▼
 
