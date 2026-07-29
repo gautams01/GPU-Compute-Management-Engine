@@ -243,6 +243,25 @@ const SCENARIO_COHORTS = {
 // the Compute Supply tab's engine to weight the expected-value calculations.
 const SCENARIO_PROB_STORE = makeBookStore({ weak: 25, base: 50, strong: 25 });
 
+// Reserved-term discount curve — % off the vendor-catalog on-demand rate as
+// a function of reservation length. Owned by the Vendor Spec & Contracts tab
+// (sits under the catalog since it's a pricing assumption), read by the
+// Supply Filling Engine. Three anchor points (1yr / 3yr / 5yr) that the
+// engine interpolates piecewise-linearly for arbitrary term lengths.
+// Non-linear because the anchors aren't equally spaced — biggest jump is 0→1yr
+// (paying at all vs. any commitment), then diminishing returns.
+const RESERVED_DISCOUNT_STORE = makeBookStore({ d1: 30, d3: 50, d5: 60 });
+// Piecewise-linear discount fraction (0..1) at an arbitrary term length.
+function discountForTerm(termMo, d) {
+  const d1 = (d?.d1 ?? 30) / 100, d3 = (d?.d3 ?? 50) / 100, d5 = (d?.d5 ?? 60) / 100;
+  const y = termMo / 12;
+  if (y <= 0) return 0;
+  if (y <= 1) return d1 * y;
+  if (y <= 3) return d1 + (d3 - d1) * (y - 1) / 2;
+  if (y <= 5) return d3 + (d5 - d3) * (y - 3) / 2;
+  return d5;
+}
+
 // Pricing assumptions — what Prime Intellect charges customers, $/H100e-hour,
 // by workload. Owned by the Compute Demand tab; feeds the Projections revenue
 // math (training and inference are priced differently). The Projections
@@ -356,6 +375,103 @@ function useBookStore(store) {
 // cost after prepay financing, break-even sell-through, term risk against
 // declining market rates — and log it to the book if accepted.
 // ═════════════════════════════════════════════════════════════════════════════
+
+// ─── Vendor catalog (module-scope so both VendorSpecApp and SupplySideApp can read it) ──
+// Owned display-wise by the Vendor Spec & Contracts tab, but the Supply Filling
+// Engine reads it too — specifically to name the cheapest OD vendors when the
+// engine recommends ON-DEMAND for a bucket. Prices are on-demand hourly rates
+// as quoted by each provider (2026 snapshot; refresh quarterly).
+const CATALOG = [
+  // ─── H100 SXM (80 GB, HGX 8×) ───────────────────────────────────────────────
+  { id: 1,  provider: "CoreWeave",       gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.46,  kwh: 0.07,  pue: 1.15, storage: "VAST / local NVMe",     storageAdd: 0.05, egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "64",           resale: true,  notes: "HGX H100 SXM5; dedicated tenancy; IB NDR scale-out" },
+  { id: 2,  provider: "Voltage Park",    gpu: "H100",    region: "US-Central",     node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.99,  kwh: 0.055, pue: 1.3,  storage: "Local NVMe",            storageAdd: 0.05, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "Bare-metal, no virtualization overhead" },
+  { id: 3,  provider: "Hyperstack",      gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.90,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.03, egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "US and Canada regions; on-demand 8× bare metal" },
+  { id: 4,  provider: "Denvr Dataworks",  gpu: "H100",   region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.30,  kwh: 0.065, pue: 1.2,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "Sustainability focus; good PUE" },
+  { id: 5,  provider: "Latitude.sh",     gpu: "H100",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.79,  kwh: 0.07,  pue: 1.25, storage: "Local NVMe",            storageAdd: 0.04, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "Global footprint; competitive 8× rate; on-demand" },
+  { id: 6,  provider: "GMI Cloud",       gpu: "H100",    region: "APAC",           node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.00,  kwh: 0.08,  pue: 1.25, storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.02,  sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 3,  minCommit: "64",           resale: true,  notes: "Taiwan-sited; export-control screening applies" },
+  { id: 7,  provider: "Crusoe",          gpu: "H100",    region: "US-Central",     node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.90,  kwh: 0.045, pue: 1.2,  storage: "Lustre incl.",          storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "128",          resale: true,  notes: "Stranded-power / behind-the-meter; lowest kwh cost in class" },
+  { id: 8,  provider: "Nebius",          gpu: "H100",    region: "EU",             node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.87,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "EU-sited; hydro power; low PUE; spot ~$2.15/GPU-hr" },
+  { id: 9,  provider: "Vultr",           gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.30,  kwh: 0.08,  pue: 1.25, storage: "Block / object",        storageAdd: 0.06, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "8× bare-metal H100; on-demand with no long-term commit" },
+  { id: 10, provider: "Scaleway",        gpu: "H100",    region: "EU",             node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.62,  kwh: 0.06,  pue: 1.15, storage: "Object storage",        storageAdd: 0.04, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 2,  minCommit: "8",            resale: true,  notes: "French DC; EU data residency; hydro-heavy grid" },
+  { id: 11, provider: "DigitalOcean",    gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.99,  kwh: 0.08,  pue: 1.25, storage: "Spaces (object)",       storageAdd: 0.05, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "On-demand H100 cluster; good developer UX; IB network" },
+  { id: 12, provider: "RunPod",          gpu: "H100",    region: "Global (mixed)", node: 8,  ic: "nvlink4", outFabric: "roce",      price: 2.99,  kwh: 0.08,  pue: 1.3,  storage: "Network vol. (extra)",  storageAdd: 0.05, egress: 0,     sla: 99.0, support: "community", tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "Secure Cloud; distributed host network; spot ~$2.39" },
+  { id: 13, provider: "Civo",            gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.99,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.04, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "none (commit tiers)", resale: true, notes: "On-demand $2.99; 6mo→$2.79, 12mo→$2.69, 24mo→$2.59, 36mo→$2.49" },
+  { id: 14, provider: "Lambda Labs",     gpu: "H100",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.99,  kwh: 0.06,  pue: 1.25, storage: "Local NVMe",            storageAdd: 0.05, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "1-Click Cluster; IB scale-out; ML-first UX" },
+  { id: 15, provider: "GCP",             gpu: "H100",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.20,  kwh: 0.085, pue: 1.1,  storage: "Filestore / GCS",       storageAdd: 0.14, egress: 0.08,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "A3 Mega (8× SXM5); 1-yr CUD ~30% off; spot ~$1.15/GPU-hr" },
+  { id: 16, provider: "Azure",           gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 6.98,  kwh: 0.09,  pue: 1.18, storage: "Azure Files Premium",   storageAdd: 0.15, egress: 0.087, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "ND H100 v5; 1-yr reserved ~$5.80, 3-yr ~$4.30" },
+  { id: 17, provider: "AWS",             gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "eth",       price: 6.88,  kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "P5 (8× H100); EFA (Ethernet-based RDMA, not IB); spot ~$0.83/GPU-hr" },
+  { id: 18, provider: "OCI",             gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 10.00, kwh: 0.07,  pue: 1.15, storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "BM.GPU4.8; high sticker; generous egress/storage credits in deals" },
+
+  // ─── H200 (141 GB, HGX 8×) ──────────────────────────────────────────────────
+  { id: 19, provider: "CoreWeave",       gpu: "H200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.62,  kwh: 0.07,  pue: 1.15, storage: "VAST / local NVMe",     storageAdd: 0.05, egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "HGX H200 SXM5; 141GB HBM3e — ~33% more memory than H100" },
+  { id: 20, provider: "GMI Cloud",       gpu: "H200",    region: "APAC",           node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.60,  kwh: 0.08,  pue: 1.25, storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.02,  sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 3,  minCommit: "64",           resale: true,  notes: "Taiwan-sited H200; export-control screening applies" },
+  { id: 21, provider: "Hyperstack",      gpu: "H200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.99,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.03, egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "8",            resale: true,  notes: "On-demand H200 8-GPU; standard HGX form factor" },
+  { id: 22, provider: "Crusoe",          gpu: "H200",    region: "US-Central",     node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.29,  kwh: 0.045, pue: 1.2,  storage: "Lustre incl.",          storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "128",          resale: true,  notes: "Behind-the-meter siting; premium H200 pricing vs H100" },
+  { id: 23, provider: "Nebius",          gpu: "H200",    region: "EU",             node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.52,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 3,  minCommit: "64",           resale: true,  notes: "EU-sited; hydro power; spot ~$2.45/GPU-hr" },
+  { id: 24, provider: "DigitalOcean",    gpu: "H200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.44,  kwh: 0.08,  pue: 1.25, storage: "Spaces (object)",       storageAdd: 0.05, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "On-demand H200; same platform as their H100 offering" },
+  { id: 25, provider: "RunPod",          gpu: "H200",    region: "Global (mixed)", node: 8,  ic: "nvlink4", outFabric: "roce",      price: 3.99,  kwh: 0.08,  pue: 1.3,  storage: "Network vol. (extra)",  storageAdd: 0.05, egress: 0,     sla: 99.0, support: "community", tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "Secure Cloud; community $3.59; spot ~$3.99" },
+  { id: 26, provider: "GCP",             gpu: "H200",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.58,  kwh: 0.085, pue: 1.1,  storage: "Filestore / GCS",       storageAdd: 0.14, egress: 0.08,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "A3 Ultra (8× H200 SXM5); spot ~$4.46/GPU-hr" },
+  { id: 27, provider: "AWS",             gpu: "H200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "eth",       price: 7.91,  kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "P5e (8× H200); EFA network; spot ~$2.23/GPU-hr" },
+  { id: 28, provider: "OCI",             gpu: "H200",    region: "Middle East",    node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 10.00, kwh: 0.07,  pue: 1.2,  storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "Middle East and EU regions; high sticker; deal credits common" },
+
+  // ─── B200 (192 GB, HGX 8× or NVL72 rack) ───────────────────────────────────
+  { id: 29, provider: "CoreWeave",       gpu: "B200",    region: "US-East",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 4.26,  kwh: 0.07,  pue: 1.15, storage: "VAST incl.",            storageAdd: 0,    egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 8,  minCommit: "1 rack (72)",  resale: true,  notes: "GB200 NVL72 rack-scale; liquid cooled; 1.8TB/s NVLink5 per GPU" },
+  { id: 30, provider: "Nebius",          gpu: "B200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.95,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "64",           resale: true,  notes: "HGX B200 8-GPU form factor (not NVL72); on-demand" },
+  { id: 31, provider: "GMI Cloud",       gpu: "B200",    region: "APAC",           node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.00,  kwh: 0.08,  pue: 1.25, storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.02,  sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 6,  minCommit: "64",           resale: true,  notes: "Taiwan-sited HGX B200; export-control screening applies" },
+  { id: 32, provider: "Vultr",           gpu: "B200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.50,  kwh: 0.08,  pue: 1.25, storage: "Block / object",        storageAdd: 0.06, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 2,  minCommit: "8",            resale: true,  notes: "HGX B200 8-GPU bare metal; on-demand; competitive vs peers" },
+  { id: 33, provider: "Hyperstack",      gpu: "B200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 6.00,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.03, egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "8",            resale: true,  notes: "HGX B200 8-GPU; on-demand availability" },
+  { id: 34, provider: "Lambda Labs",     gpu: "B200",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 6.69,  kwh: 0.06,  pue: 1.25, storage: "Local NVMe",            storageAdd: 0.05, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 2,  minCommit: "8",            resale: true,  notes: "1-Click Cluster; HGX B200; EU/APAC/ME regions available" },
+  { id: 35, provider: "RunPod",          gpu: "B200",    region: "Global (mixed)", node: 8,  ic: "nvlink4", outFabric: "roce",      price: 5.49,  kwh: 0.08,  pue: 1.3,  storage: "Network vol. (extra)",  storageAdd: 0.05, egress: 0,     sla: 99.0, support: "community", tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "Secure Cloud; community $5.98; on-demand $5.49" },
+  { id: 36, provider: "GCP",             gpu: "B200",    region: "US-West",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 8.05,  kwh: 0.085, pue: 1.1,  storage: "Filestore / GCS",       storageAdd: 0.14, egress: 0.08,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 6,  minCommit: "1yr reserve",  resale: false, notes: "A4 (GB200 NVL72) rack-scale; spot ~$4.08/GPU-hr" },
+  { id: 37, provider: "AWS",             gpu: "B200",    region: "US-East",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 14.24, kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "P6 (GB200 NVL72); highest on-demand sticker; spot ~$5.01/GPU-hr" },
+  { id: 38, provider: "OCI",             gpu: "B200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 14.00, kwh: 0.07,  pue: 1.15, storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 4,  minCommit: "none",         resale: false, notes: "HGX B200; premium on-demand list; deal credits common" },
+
+  // ─── B300 / HGX B300 (Blackwell Ultra, 288 GB) ─────────────────────────────
+  { id: 39, provider: "CoreWeave",       gpu: "B300",    region: "US-East",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 4.48,  kwh: 0.07,  pue: 1.15, storage: "VAST incl.",            storageAdd: 0,    egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 16, minCommit: "1 rack (72)",  resale: true,  notes: "GB300 NVL72 rack-scale; 288GB HBM3e per GPU; long lead time" },
+  { id: 40, provider: "Vultr",           gpu: "B300",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.80,  kwh: 0.08,  pue: 1.25, storage: "Block / object",        storageAdd: 0.06, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 4,  minCommit: "8",            resale: true,  notes: "HGX B300 8-GPU; unusually low on-demand price for Blackwell Ultra" },
+  { id: 41, provider: "Nebius",          gpu: "B300",    region: "EU",             node: 8,  ic: "nvlink5", outFabric: "ib_xdr",    price: 4.30,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 8,  minCommit: "64",           resale: true,  notes: "EU-sited B300; UK availability; spot ~$4.30" },
+  { id: 42, provider: "RunPod",          gpu: "B300",    region: "Global (mixed)", node: 8,  ic: "nvlink4", outFabric: "roce",      price: 7.39,  kwh: 0.08,  pue: 1.3,  storage: "Network vol. (extra)",  storageAdd: 0.05, egress: 0,     sla: 99.0, support: "community", tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "Secure Cloud; community $6.94; on-demand $7.39" },
+  { id: 43, provider: "Scaleway",        gpu: "B300",    region: "EU",             node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 9.01,  kwh: 0.06,  pue: 1.15, storage: "Object storage",        storageAdd: 0.04, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 4,  minCommit: "8",            resale: true,  notes: "EU data residency; B300 8-GPU node; high list, no egress in-region" },
+  { id: 44, provider: "AWS",             gpu: "B300",    region: "US-East",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 17.80, kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "Blackwell Ultra rack-scale; spot ~$3.72/GPU-hr (large spot discount)" },
+  { id: 45, provider: "OCI",             gpu: "B300",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 15.00, kwh: 0.07,  pue: 1.15, storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 6,  minCommit: "none",         resale: false, notes: "HGX B300 (Blackwell Ultra); premium enterprise list price" },
+
+  // ─── A100 SXM 80 GB (still widely used at scale) ───────────────────────────
+  { id: 46, provider: "CoreWeave",       gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.21,  kwh: 0.07,  pue: 1.2,  storage: "VAST / local NVMe",     storageAdd: 0.05, egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "64",           resale: true,  notes: "SXM4 A100; large installed base; proven reliability" },
+  { id: 47, provider: "Hyperstack",      gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.35,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.03, egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "On-demand A100 SXM; US and Canada" },
+  { id: 48, provider: "Crusoe",          gpu: "A100_80", region: "US-Central",     node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.45,  kwh: 0.045, pue: 1.2,  storage: "Lustre incl.",          storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "128",          resale: true,  notes: "Behind-the-meter power; lowest effective operating cost in class" },
+  { id: 49, provider: "Denvr Dataworks",  gpu: "A100_80", region: "US-Central",    node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 0.58,  kwh: 0.065, pue: 1.2,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "256 · 12mo",   resale: true,  notes: "Very aggressive rate — likely prepay or stranded-power deal" },
+  { id: 50, provider: "Lambda Labs",     gpu: "A100_80", region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.79,  kwh: 0.06,  pue: 1.25, storage: "Local NVMe",            storageAdd: 0.05, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "On-demand A100 SXM; good for burst capacity" },
+  { id: 51, provider: "GCP",             gpu: "A100_80", region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.85,  kwh: 0.085, pue: 1.1,  storage: "Filestore / GCS",       storageAdd: 0.14, egress: 0.08,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "A2 Ultra (8× A100 SXM4); spot ~$1.39/GPU-hr; 1-yr CUD" },
+  { id: 52, provider: "AWS",             gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "eth",       price: 2.74,  kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "P4d (8× A100); EFA networking; spot ~$0.84/GPU-hr" },
+  { id: 53, provider: "Azure",           gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.67,  kwh: 0.09,  pue: 1.18, storage: "Azure Files Premium",   storageAdd: 0.15, egress: 0.087, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "NC A100 v4; 3-yr reserved ~$2.13; spot ~$0.40" },
+  { id: 54, provider: "OCI",             gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.00,  kwh: 0.07,  pue: 1.2,  storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "BM.GPU.A100-v2.8; premium list; deal credits common" },
+
+  // ─── L40S (inference-scale, PCIe — no NVLink) ──────────────────────────────
+  { id: 55, provider: "CoreWeave",       gpu: "L40S",    region: "US-East",        node: 8,  ic: "pcie",    outFabric: "ib_ndr",    price: 0.985, kwh: 0.07,  pue: 1.2,  storage: "VAST / local NVMe",     storageAdd: 0.05, egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "Inference-optimized; L40S has no NVLink — PCIe within node, IB across nodes" },
+  { id: 56, provider: "Nebius",          gpu: "L40S",    region: "EU",             node: 8,  ic: "pcie",    outFabric: "roce",      price: 1.55,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: true,  notes: "EU-sited L40S; spot ~$0.75/GPU-hr; 4-GPU max node" },
+  { id: 57, provider: "Crusoe",          gpu: "L40S",    region: "US-Central",     node: 8,  ic: "pcie",    outFabric: "roce",      price: 1.45,  kwh: 0.045, pue: 1.2,  storage: "Lustre incl.",          storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "Behind-the-meter power; good economics for inference workloads" },
+  { id: 58, provider: "Scaleway",        gpu: "L40S",    region: "EU",             node: 8,  ic: "pcie",    outFabric: "ib_ndr",    price: 1.70,  kwh: 0.06,  pue: 1.15, storage: "Object storage",        storageAdd: 0.04, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "EU L40S; IB scale-out for multi-node tensor-parallel inference" },
+  { id: 59, provider: "AWS",             gpu: "L40S",    region: "US-East",        node: 8,  ic: "pcie",    outFabric: "eth",       price: 1.86,  kwh: 0.09,  pue: 1.15, storage: "EBS / S3",              storageAdd: 0.10, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "G6 (Ada Lovelace); serving-optimized; standard EBS/S3 storage" },
+  { id: 60, provider: "OCI",             gpu: "L40S",    region: "US-East",        node: 4,  ic: "pcie",    outFabric: "ib_ndr",    price: 3.50,  kwh: 0.07,  pue: 1.15, storage: "Block / object",        storageAdd: 0.08, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "L40S 4-GPU max node; enterprise support; high list" },
+];
+
+// Cheapest N on-demand vendors for a bucket. Matches gpu strictly, and prefers
+// exact matches on outFabric and region before falling back to just the GPU.
+// Returns [] if no catalog entry matches the gpu. Skips hyperscalers with no
+// egress-neutral OD if the caller only wants the "clean OD" tier — for now
+// includes all catalog entries.
+function pickODVendors(gpu, fab, region, n = 3) {
+  const gpuMatches = CATALOG.filter(c => c.gpu === gpu);
+  if (!gpuMatches.length) return [];
+  const scored = gpuMatches.map(c => {
+    let penalty = 0;
+    if (fab && c.outFabric !== fab) penalty += 0.15;
+    if (region && c.region !== region) penalty += 0.08;
+    return { c, score: c.price + penalty };
+  });
+  scored.sort((a, b) => a.score - b.score);
+  return scored.slice(0, n).map(s => s.c);
+}
 
 const SupplySideApp = (() => {
 
@@ -816,23 +932,19 @@ function cascadeFill(supplyBuckets, demandBuckets, horizon) {
 // logic — with liquid resale and healthy OD premium the fractile is low
 // (~0.35), so commitLevel lands at/above base. Poor salvage (obsolescence-
 // prone chips, training-only supply) pulls it toward weak.
-function computeCommitLevels(supplyBuckets, demandByScenario, probs, salvageMult, refWindow) {
+function computeCommitLevels(supplyBuckets, demandByScenario, probs, salvageMult, refWindow, reservedDiscount) {
   const [r0, r1] = refWindow;
   const bucketKeys = new Set();
   for (const s of Object.keys(demandByScenario)) for (const k of Object.keys(demandByScenario[s])) bucketKeys.add(k);
   for (const k of Object.keys(supplyBuckets)) bucketKeys.add(k);
   const out = {};
+  const TERM_CHOICES = [12, 36, 60];
   for (const k of bucketKeys) {
     const [gpu, fab, region] = k.split("|");
     const g = SUPPLY_GPUS[gpu]; if (!g) continue;
     const sup = supplyBuckets[k];
-    const reservedRate = sup?.blendedReservedRate ?? g.market * 0.75;
     const odRate = g.odSource;
     const salvage = (salvageMult[gpu] ?? 0.65) * g.spotRef;
-    const save = Math.max(0, odRate - reservedRate);
-    const loss = Math.max(0, reservedRate - salvage);
-    const denom = save + loss;
-    const fractile = denom > 0 ? loss / denom : 0.5;
     const scen = Object.keys(demandByScenario);
     const scenLevels = scen.map(s => {
       const d = demandByScenario[s]?.[k]; if (!d) return 0;
@@ -840,15 +952,53 @@ function computeCommitLevels(supplyBuckets, demandByScenario, probs, salvageMult
       return sum / Math.max(1, r1 - r0);
     });
     const pairs = scen.map((s, i) => ({ s, D: scenLevels[i], P: probs[s] || 0 })).sort((a, b) => b.D - a.D);
-    let cum = 0, commitLevel = 0;
-    for (const p of pairs) { cum += p.P; if (cum >= fractile) { commitLevel = p.D; break; } }
-    if (commitLevel === 0 && pairs.length) commitLevel = pairs[pairs.length - 1].D;
     const scenObj = Object.fromEntries(scen.map((s, i) => [s, scenLevels[i]]));
     const weakD = scenObj.weak ?? 0, baseD = scenObj.base ?? 0, strongD = scenObj.strong ?? 0;
+
+    // Per-term newsvendor. Each term has its own reserved rate (from the
+    // discount curve), which shifts save-if-used and loss-if-idle and
+    // therefore the fractile ratio + implied commit level. Strict snap-down:
+    // commit at the largest scenario D such that P(D ≥ D) ≥ fractile. No
+    // interpolation between scenarios — the 3-scenario model can't distinguish
+    // fractiles that fall in the same probability bin, so multiple terms will
+    // often produce the same commit. That's honest to the discretization; term
+    // differentiation for the actual buy decision lives in the recommendations
+    // table's excess-EV-per-prepaid-$ sweep, not in tranche sizing.
+    const commitAtFractile = (fractile) => {
+      let cum = 0;
+      for (const p of pairs) {
+        cum += p.P;
+        if (cum >= fractile) return p.D;
+      }
+      return pairs.length ? pairs[pairs.length - 1].D : 0;
+    };
+    const perTerm = {};
+    for (const T of TERM_CHOICES) {
+      const rateT = odRate * (1 - discountForTerm(T, reservedDiscount));
+      const saveT = Math.max(0, odRate - rateT);
+      const lossT = Math.max(0, rateT - salvage);
+      const denomT = saveT + lossT;
+      const fractileT = denomT > 0 ? lossT / denomT : 0.5;
+      const commitLevelT = commitAtFractile(fractileT);
+      const committedTrancheT = Math.min(commitLevelT, weakD);
+      const ladderTrancheT = Math.max(0, commitLevelT - committedTrancheT);
+      const flexTrancheT = Math.max(0, strongD - commitLevelT);
+      perTerm[T] = { termMo: T, reservedRate: rateT, save: saveT, loss: lossT, fractile: fractileT, commitLevel: commitLevelT, committedTranche: committedTrancheT, ladderTranche: ladderTrancheT, flexTranche: flexTrancheT };
+    }
+    // Blended anchor kept for backward-compat and legacy display references.
+    // Uses the old blendedReservedRate from the supply book if present, else
+    // 75% of market — the pre-discount-curve default. NOT used by the engine
+    // anymore (engine reads perTerm[T] directly).
+    const reservedRate = sup?.blendedReservedRate ?? g.market * 0.75;
+    const save = Math.max(0, odRate - reservedRate);
+    const loss = Math.max(0, reservedRate - salvage);
+    const fractile = (save + loss) > 0 ? loss / (save + loss) : 0.5;
+    const commitLevel = commitAtFractile(fractile);
     const committedTranche = Math.min(commitLevel, weakD);
     const ladderTranche = Math.max(0, commitLevel - committedTranche);
     const flexTranche = Math.max(0, strongD - commitLevel);
-    out[k] = { gpu, fab, region, fractile, commitLevel, committedTranche, ladderTranche, flexTranche, reservedRate, odRate, salvage, weakD, baseD, strongD };
+
+    out[k] = { gpu, fab, region, fractile, commitLevel, committedTranche, ladderTranche, flexTranche, reservedRate, odRate, salvage, weakD, baseD, strongD, perTerm };
   }
   return out;
 }
@@ -887,14 +1037,28 @@ function generateCandidates(commitLevels, cascade, supplyBuckets, demandByScenar
     //     the extra capacity the newsvendor fractile wants us to commit to,
     //     signed only when actuals-to-date confirm ≥ base trajectory.
     // Above commitLevel is the FLEX tranche — never committed, OD/spot only.
+    // Safe tranche is TERM-INVARIANT: weakD is a fact about demand, not about
+    // the reserved rate — the "always full" floor doesn't change when the term
+    // does. Ladder tranche is TERM-DEPENDENT: each term has its own fractile
+    // (bigger discount → smaller loss-if-idle → lower fractile → commit more
+    // aggressively → bigger ladder), so ladderSize varies per T.
     const safeSize = Math.max(0, cl.weakD - curSup);
-    const ladderSize = Math.max(0, cl.commitLevel - Math.max(cl.weakD, curSup));
+    const ladderSizeAt = (T) => {
+      const perT = cl.perTerm?.[T];
+      const commitT = perT ? perT.commitLevel : cl.commitLevel;
+      return Math.max(0, commitT - Math.max(cl.weakD, curSup));
+    };
     // Build the eligible vendor cohort for a given tranche term. cmax gates
     // are the same as before: 24mo+ terms require platinum/gold operators
     // (bronze can't hold a 2-year commitment); shorter terms drop bronze but
     // allow anyone else. Each vendor gets its own priced offer — platinum
     // charges a 6% premium on rate and demands 20% upfront, gold +3% / 15%,
     // silver flat / 10%.
+    // Term-aware pricing: vendor rate = on-demand catalog rate × (1 - term
+    // discount) × operator tier multiplier. The discount curve is set on the
+    // Vendor Spec tab (three anchors: 1yr / 3yr / 5yr) and interpolated
+    // piecewise-linearly for arbitrary term lengths — see discountForTerm.
+    // Longer terms and less-tier-premium vendors both cut the hourly rate.
     const eligibleVendors = (termMo) => {
       const list = PROVIDERS.filter(p => {
         const c = cmaxOf(p);
@@ -902,20 +1066,20 @@ function generateCandidates(commitLevels, cascade, supplyBuckets, demandByScenar
         return c && c !== "bronze";
       });
       if (!list.length) list.push("CoreWeave");
-      const rate = cl.reservedRate * 0.98;
+      const odRate = g.odSource;
+      const termDisc = discountForTerm(termMo, params.reservedDiscount);
+      const reservedRate = odRate * (1 - termDisc);
       return list.map(p => ({
         name: p,
-        rate: rate * (cmaxOf(p) === "platinum" ? 1.06 : cmaxOf(p) === "gold" ? 1.03 : 1.0),
+        rate: reservedRate * (cmaxOf(p) === "platinum" ? 1.06 : cmaxOf(p) === "gold" ? 1.03 : 1.0),
         cmax: cmaxOf(p),
         prepay: cmaxOf(p) === "platinum" ? 20 : cmaxOf(p) === "gold" ? 15 : 10,
+        odRate, termDisc,
       }));
     };
-    const buildCandidateFor = (sizeH100e, kind, vendor, allVendors) => {
+    const buildCandidateFor = (sizeH100e, kind, vendor, allVendors, termMo) => {
       if (sizeH100e <= 1) return null;
       const gpusNeeded = Math.max(64, Math.round(sizeH100e * SUPPLY_GPUS.H100.tflops / g.tflops / 8) * 8);
-      // Longer terms for the safe floor (robust; fractile floor is stable).
-      // Ladder is short — you're waiting on a signal.
-      const termMo = kind === "safe" ? (cl.fractile > 0.55 ? 36 : 24) : 12;
       const rampMo = 3;
       // Contract mechanics (effRate incl. prepay carry, upfront$). Util=100
       // because scenario revenue is computed ourselves at CUSTOMER prices —
@@ -1033,10 +1197,11 @@ function generateCandidates(commitLevels, cascade, supplyBuckets, demandByScenar
         declineReason = fails.length ? fails.join("; ") : "local margin gate";
       }
       return {
-        id: key + "-" + kind + "-" + vendor.name, key, gpu, fab, region,
+        id: key + "-" + kind + "-" + vendor.name + "-t" + termMo, key, gpu, fab, region,
         action: actionFor,
         targetH100e: sizeH100e, gpus: gpusNeeded, termMo,
         rate: vendor.rate, vendor, vendors: allVendors, prepaid,
+        odRate: vendor.odRate, termDiscount: vendor.termDisc,
         EV, downside, evPerDollar, perScenario, weakUtil, fractile: cl.fractile,
         trigger: kind === "safe" ? "now — committed tranche (weak-covered floor)" : "mo 6 — ladder increment, sign only if base trajectory confirms",
         tranche: kind,
@@ -1044,40 +1209,218 @@ function generateCandidates(commitLevels, cascade, supplyBuckets, demandByScenar
         declineReason,
       };
     };
-    // Sweep every eligible vendor per tranche, keep the winner. Ranking:
-    // (1) prefer candidates that PASS the local margin gate over ones that
-    // fail — a passing SIGN beats a "higher-EV but marginally unprofitable"
-    // one; (2) among peers, highest EV/$-prepaid wins. If ALL vendors fail
-    // the local gate the "winner" is still the best-scoring loser, so it
-    // shows up as a DECLINE with an honest reason rather than silently
-    // dropping the bucket. Downstream (stage 10) can still gate the winner
-    // on concentration / prepay caps.
-    const pickBest = (sizeH100e, kind) => {
-      if (sizeH100e <= 1) return null;
-      const termMo = kind === "safe" ? (cl.fractile > 0.55 ? 36 : 24) : 12;
-      const vendors = eligibleVendors(termMo);
-      const perVendor = vendors.map(v => buildCandidateFor(sizeH100e, kind, v, vendors)).filter(Boolean);
-      if (!perVendor.length) return null;
-      perVendor.sort((a, b) => {
+    // OD baseline for a given tranche + horizon. On-demand economics differ
+    // structurally from reserved: no upfront prepay, no lock-in, and cost
+    // scales with delivered hours (you only pay for what you use). Cost per
+    // month = util × gpus × live × odRate × 730 (util-scaled) vs. reserved's
+    // util-INDEPENDENT fixed capacity cost. Revenue math is identical.
+    // Returned EV becomes the baseline every reserved candidate at term T is
+    // scored against — the reserved deal has to earn ENOUGH extra profit per
+    // dollar of prepaid capital to beat sitting on OD.
+    const computeODBaseline = (sizeH100e, kind, termMo) => {
+      const gpusEquiv = Math.max(64, Math.round(sizeH100e * SUPPLY_GPUS.H100.tflops / g.tflops / 8) * 8);
+      const rampMo = 3;
+      const flopsRatio = g.tflops / SUPPLY_GPUS.H100.tflops;
+      const bwRatio = g.bw / SUPPLY_GPUS.H100.bw;
+      const odRate = g.odSource;
+      const nMonths = Math.min(termMo, ENGINE_HORIZON);
+      const perScenario = {};
+      for (const s of Object.keys(demandByScenario)) {
+        const dem = demandByScenario[s]?.[key];
+        // Ladder under weak: trigger doesn't fire; we're not signing anything
+        // AND we're not spinning up alternate OD capacity either. Zero-profit
+        // parity with the reserved ladder-under-weak treatment.
+        const isLadderInWeak = kind === "ladder" && s === "weak";
+        if (isLadderInWeak) { perScenario[s] = { profit: 0, util: 0 }; continue; }
+        let sumProfit = 0, sumUtil = 0, sumMonths = 0;
+        for (let m = 0; m < nMonths; m++) {
+          const live = rampMo > 0 ? Math.min(1, (m + 1) / rampMo) : 1;
+          const dt = dem ? (dem.total[m] || 0) : 0;
+          const di = dem ? (dem.infTot[m] || 0) : 0;
+          const infShareM = dt > 0 ? di / dt : 0.5;
+          const h100ePerGpuM = infShareM * bwRatio + (1 - infShareM) * flopsRatio;
+          const capH100eM = gpusEquiv * live * h100ePerGpuM;
+          const alreadyFilled = kind === "ladder" ? safeSize : 0;
+          const marginalDem = Math.max(0, dt - curSup - alreadyFilled);
+          const util = capH100eM > 0 ? Math.min(1, marginalDem / capH100eM) : 0;
+          const sellRateM = infShareM * params.infPrice + (1 - infShareM) * params.trainPrice;
+          const revM = util * capH100eM * sellRateM * HRS_MO;
+          // OD cost scales with delivered physical GPU-hours — the flexibility premium.
+          const costM = util * gpusEquiv * live * odRate * HRS_MO;
+          sumProfit += revM - costM;
+          sumUtil += util * live; sumMonths += live;
+        }
+        perScenario[s] = { profit: sumProfit, util: sumMonths > 0 ? sumUtil / sumMonths : 0 };
+      }
+      const EV = Object.keys(perScenario).reduce((s, sc) => s + (probs[sc] || 0) * perScenario[sc].profit, 0);
+      return { EV, perScenario, gpus: gpusEquiv, odRate, termMo };
+    };
+    // Sweep the FULL cross-product of (term length × eligible vendor) per
+    // tranche and pick the winner. Ranking metric: EXCESS EV OVER OD per
+    // prepaid dollar — a reserved deal has to beat the on-demand baseline
+    // by enough per capital dollar to justify locking in. Priority:
+    //   (1) local margin gate pass > fail — a passing SIGN beats a
+    //       "higher-excess but marginally unprofitable" one;
+    //   (2) among peers, highest EXCESS EV / prepaid$ wins.
+    // Term choices are asymmetric by tranche: SAFE covers a weak-case floor
+    // so we're willing to sit in a 5-yr contract; LADDER is a conditional
+    // signal-driven increment so we cap at 3yr. If NO reserved candidate has
+    // positive excess-EV/$, OD wins the tranche → "on-demand" action (stay
+    // flexible). If even OD has negative EV (sell rate < OD rate under the
+    // scenario weights) → DECLINE — nothing here is profitable. Alternates
+    // carry sibling vendors AT THE SAME winning term — those are what stage
+    // 10 swaps to under a concentration cap trip.
+    const pickBest = (sizeAt, kind) => {
+      // sizeAt may be a scalar (term-invariant, e.g. safe tranche = weakD −
+      // curSup) or a function T → size (term-dependent, e.g. ladder = per-term
+      // commitLevel − weakD). Normalize to a function.
+      const sizeFn = typeof sizeAt === "function" ? sizeAt : () => sizeAt;
+      const termChoices = kind === "safe" ? [12, 36, 60] : [12, 36];
+      const allCands = [];
+      const odBaselines = {};
+      let anySize = false;
+      for (const termMo of termChoices) {
+        const sizeH100e = sizeFn(termMo);
+        if (sizeH100e <= 1) continue;
+        anySize = true;
+        const odBase = computeODBaseline(sizeH100e, kind, termMo);
+        odBaselines[termMo] = odBase;
+        const vendors = eligibleVendors(termMo);
+        for (const v of vendors) {
+          const c = buildCandidateFor(sizeH100e, kind, v, vendors, termMo);
+          if (!c) continue;
+          c.evOD = odBase.EV;
+          c.excessEV = c.EV - odBase.EV;
+          c.excessEvPerDollar = c.prepaid > 0 ? c.excessEV / c.prepaid : 0;
+          allCands.push(c);
+        }
+      }
+      if (!anySize || !allCands.length) return null;
+      allCands.sort((a, b) => {
         const aPass = a.action !== "decline" ? 1 : 0;
         const bPass = b.action !== "decline" ? 1 : 0;
         if (aPass !== bPass) return bPass - aPass;
-        return (b.evPerDollar || 0) - (a.evPerDollar || 0);
+        return (b.excessEvPerDollar || 0) - (a.excessEvPerDollar || 0);
       });
-      const winner = perVendor[0];
-      // Stash the ranked alternates so stage 10 can swap the vendor when the
-      // primary trips a book-level guardrail (concentration cap). Each alt is
-      // a fully-scored candidate with its own vendor's rate/prepay/EV — no
-      // approximation needed on swap.
-      winner.alternates = perVendor.slice(1);
+      const topReserved = allCands[0];
+      // OD wins the tranche if the best reserved candidate either fails gates
+      // or has excess-EV ≤ 0 (OD baseline beats or ties it). Pick the term
+      // whose OD-EV is highest as the display term for the ON-DEMAND row.
+      const reservedBeatsOD = topReserved.action !== "decline" && (topReserved.excessEvPerDollar || 0) > 0;
+      const bestODTerm = Object.keys(odBaselines).map(Number).sort((a, b) => (odBaselines[b].EV - odBaselines[a].EV))[0];
+      const odBase = odBaselines[bestODTerm];
+      const odSize = sizeFn(bestODTerm);
+      if (!reservedBeatsOD) {
+        // OD wins the tranche outright. Emit a primary ON-DEMAND row for the
+        // cheapest catalog vendor + up to 2 alternate rows for the next-cheapest
+        // catalog vendors — so the model tells the user WHO to buy OD from and
+        // at what price. If OD-EV itself is ≤ 0 (unprofitable under the priors),
+        // fall through to DECLINE — nothing here is worth doing.
+        if (odBase.EV <= 0) {
+          // Return the best reserved as a DECLINE with an honest reason —
+          // even OD can't turn a profit at this bucket's demand vs. sell rate.
+          topReserved.action = "decline";
+          topReserved.declineReason = (topReserved.declineReason ? topReserved.declineReason + "; " : "") +
+            `on-demand baseline also unprofitable (EV $${(odBase.EV / 1e6).toFixed(2)}M) — no scenario clears margin`;
+          topReserved.alternates = allCands.filter(c => c !== topReserved && c.termMo === topReserved.termMo);
+          topReserved.termAlternates = [];
+          return topReserved;
+        }
+        const topOD = pickODVendors(gpu, fab, region, 3);
+        // Fallback to a single generic row if no catalog match (shouldn't
+        // happen for the six modeled chips, but keeps the flow resilient).
+        const odRows = topOD.length ? topOD : [{ provider: "on-demand market", price: odBase.odRate, gpu, outFabric: fab, region }];
+        const makeODCand = (v, idx) => {
+          const isPrimary = idx === 0;
+          // Vendor's specific OD price becomes the rate. EV/profit numbers are
+          // re-scaled from the class-anchor OD baseline by the vendor-vs-anchor
+          // price ratio: profit = revenue − util × gpus × price × hrs, so
+          // adjusting price scales the cost side while leaving revenue fixed.
+          const priceRatio = v.price / odBase.odRate;
+          const scaledPerScen = {};
+          for (const s of Object.keys(odBase.perScenario)) {
+            const p = odBase.perScenario[s];
+            // approx: rescale profit by (rev − scaled_cost) where scaled_cost = orig_cost × priceRatio.
+            // Since orig profit = rev − orig_cost, and we don't have rev separately, use:
+            // rev = profit + orig_cost. Then new profit = rev − orig_cost × priceRatio = profit + orig_cost × (1 − priceRatio).
+            // orig_cost ≈ util × gpus × odRate × HRS_MO × months_live. Estimate months_live from util path.
+            // Simpler and honest: scale by (2 − priceRatio) as a first-order approximation of the profit swing when rates move,
+            // clamped. This is an approximation — the ranking (primary=cheapest) is what matters.
+            const scaleFactor = Math.max(0, 2 - priceRatio);
+            scaledPerScen[s] = { profit: (p.profit || 0) * scaleFactor, util: p.util || 0 };
+          }
+          const scaledEV = Object.keys(scaledPerScen).reduce((s, sc) => s + (probs[sc] || 0) * scaledPerScen[sc].profit, 0);
+          return {
+            id: key + "-" + kind + "-OD-" + v.provider.replace(/\s+/g, "_") + "-" + idx,
+            key, gpu, fab, region,
+            action: "on-demand",
+            targetH100e: odSize,
+            gpus: odBase.gpus,
+            termMo: 0,
+            rate: v.price,
+            vendor: { name: v.provider, cmax: null, catalog: v },
+            vendors: [],
+            prepaid: 0,
+            odRate: odBase.odRate,
+            termDiscount: 0,
+            EV: scaledEV,
+            evOD: odBase.EV,
+            excessEV: 0,
+            excessEvPerDollar: 0,
+            evPerDollar: 0,
+            downside: scaledPerScen.weak?.profit ?? 0,
+            perScenario: scaledPerScen,
+            weakUtil: scaledPerScen.weak?.util ?? 0,
+            fractile: cl.fractile,
+            trigger: isPrimary
+              ? `PRIMARY: cheapest on-demand vendor for this bucket. On-demand baseline beat every reserved-term candidate (best reserved would have earned ${((topReserved.excessEvPerDollar || 0)).toFixed(3)} excess profit per $1 of prepay vs. OD — negative, so locking in destroys value).`
+              : `ALT #${idx}: alternative on-demand vendor at $${v.price.toFixed(2)}/hr (vs. primary at $${topOD[0].price.toFixed(2)}/hr). Same GPU/fabric/region bucket — pick this if the primary vendor is unavailable or oversubscribed.`,
+            tranche: kind,
+            gates: {},
+            declineReason: null,
+            bestReservedRejected: topReserved,
+            isOD: true,
+            odRank: idx,
+            odRegion: v.region,
+            odFabric: v.outFabric,
+            odNotes: v.notes,
+          };
+        };
+        const primaryAndAlts = odRows.map((v, i) => makeODCand(v, i));
+        // Return array — caller will spread into cands.
+        return primaryAndAlts;
+      }
+      // Reserved wins. Continue with the existing alternates logic.
+      const winner = topReserved;
+      // Alternates for stage-10 vendor swaps must share the winning term
+      // (a concentration-cap swap is a same-deal vendor substitution, not a
+      // reprice at a different term). Filter to same termMo, same tranche.
+      winner.alternates = allCands.filter(c => c !== winner && c.termMo === winner.termMo);
+      // Cross-term alternates: the runners-up at OTHER terms, one per term.
+      // Purely informational — surfaces "at 12mo the best deal would have
+      // been X, at 60mo it would have been Y". Not used for swaps.
+      const bestPerTerm = {};
+      for (const c of allCands) {
+        const t = c.termMo;
+        if (!bestPerTerm[t] || (c.excessEvPerDollar > bestPerTerm[t].excessEvPerDollar)) bestPerTerm[t] = c;
+      }
+      winner.termAlternates = Object.keys(bestPerTerm)
+        .filter(t => Number(t) !== winner.termMo)
+        .map(t => bestPerTerm[t]);
       return winner;
     };
+    // Safe tranche is term-invariant (weakD is a fact about demand); ladder
+    // tranche is term-dependent (each term's per-term commit level determines
+    // its ladder increment above weakD). This is the joint (chip, term)
+    // optimization — the winning (term, vendor, size) tuple emerges together.
     const safeCand = pickBest(safeSize, "safe");
-    const ladderCand = pickBest(ladderSize, "ladder");
-    if (safeCand) cands.push(safeCand);
-    if (ladderCand) cands.push(ladderCand);
+    const ladderCand = pickBest(ladderSizeAt, "ladder");
+    // OD path returns an array (primary + alternates); reserved path returns a
+    // single candidate. Handle both.
+    if (safeCand) { if (Array.isArray(safeCand)) cands.push(...safeCand); else cands.push(safeCand); }
+    if (ladderCand) { if (Array.isArray(ladderCand)) cands.push(...ladderCand); else cands.push(ladderCand); }
   }
-  cands.sort((a, b) => b.evPerDollar - a.evPerDollar);
+  cands.sort((a, b) => (b.excessEvPerDollar || 0) - (a.excessEvPerDollar || 0));
   return cands;
 }
 
@@ -1511,6 +1854,20 @@ function App() {
         soldPct: 0, rampMo: 3, status: "active",
       };
       setBook(b => [...b, newDeal]);
+    } else if (rec.action === "on-demand") {
+      // OD isn't a fixed contract, but recording an entry gives the supply
+      // book a visible line for "we intend to cover this bucket at OD from
+      // vendor X." No prepay, no lock-in — remMo defaults to the engine
+      // horizon so the entry appears alongside reserved positions.
+      if (!rec.vendor) return;
+      const newDeal = {
+        id: Date.now() + Math.random(),
+        provider: rec.vendor.name, gpu: rec.gpu, gpus: rec.gpus,
+        structure: "ondemand", rate: rec.rate || rec.odRate || 0, termMo: 0, remMo: 0,
+        upfrontPct: 0, pay: "net30", region: rec.region, ic: rec.fab,
+        soldPct: 0, status: "active",
+      };
+      setBook(b => [...b, newDeal]);
     } else if ((rec.action === "renew" || rec.action === "renew-partial") && rec.deal) {
       const extendMo = rec.action === "renew" ? (rec.deal.termMo || 24) : Math.max(6, Math.round((rec.deal.termMo || 24) * 0.5));
       setBook(b => b.map(r => r.id === rec.deal.id ? { ...r, remMo: (r.remMo || 0) + extendMo, termMo: (r.termMo || 0) + extendMo } : r));
@@ -1531,6 +1888,9 @@ function App() {
   // read here to weight expected values.
   const [probPct] = useBookStore(SCENARIO_PROB_STORE);
   const probs = useMemo(() => ({ weak: probPct.weak / 100, base: probPct.base / 100, strong: probPct.strong / 100 }), [probPct]);
+  // Reserved discount curve — owned by the Vendor Spec & Contracts tab (edit
+  // sliders there), read by candidate generation to price each term length.
+  const [reservedDiscount] = useBookStore(RESERVED_DISCOUNT_STORE);
   // Liquidity factor per chip (0 → dead, 1 → fully resaleable at spot ref).
   // Training-only rack-scale chips (B300 NVL72) have poor secondary markets;
   // fungible H100/H200/L40S have healthy spot markets.
@@ -1547,7 +1907,8 @@ function App() {
     weakUtilFloor: weakUtilFloor / 100, arrRun: arrRunM * 1e6, prepaidCapRatio: prepaidCapPct / 100,
     totalSpendCap: totalSpendCapM * 1e6,
     liquidityFactor: 0.45,
-  }), [wacc, mktDecline, pricing.infPrice, pricing.trainPrice, weakUtilFloor, arrRunM, prepaidCapPct, totalSpendCapM]);
+    reservedDiscount,
+  }), [wacc, mktDecline, pricing.infPrice, pricing.trainPrice, weakUtilFloor, arrRunM, prepaidCapPct, totalSpendCapM, reservedDiscount]);
 
   const demandByScenario = useMemo(
     () => buildScenarioDemand(SCENARIO_COHORTS, baseline, pricing, modelMix, demandBook, ENGINE_HORIZON),
@@ -1562,8 +1923,8 @@ function App() {
     return out;
   }, [supplyState, demandByScenario]);
   const commitLevels = useMemo(
-    () => computeCommitLevels(supplyState, demandByScenario, probs, salvage, [6, 18]),
-    [supplyState, demandByScenario, probs, salvage]
+    () => computeCommitLevels(supplyState, demandByScenario, probs, salvage, [6, 18], reservedDiscount),
+    [supplyState, demandByScenario, probs, salvage, reservedDiscount]
   );
   const candidates = useMemo(
     () => generateCandidates(commitLevels, cascadeByScenario.base, supplyState, demandByScenario, probs, engineParams),
@@ -2176,19 +2537,19 @@ function App() {
               );
             return (
               <>
-                <div style={{ overflowX: "auto" }}>
+                <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 420, border: "1px solid rgba(255,255,255,0.04)", borderRadius: 4 }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
-                    <thead><tr>
-                      <th style={th("left")}>BUCKET (chip · fabric · region)</th>
-                      <th style={th()} title="blended $/GPU-hr of existing reserved supply in this bucket, or 75% of market rate if bucket is empty">RESERVED $/HR</th>
-                      <th style={th()} title="on-demand upstream $/GPU-hr — what you'd pay if you didn't commit">OD $/HR</th>
-                      <th style={th()} title="salvage $/GPU-hr — what you can recover on secondary market if the GPU sits idle">SALVAGE $/HR</th>
-                      <th style={th()} title="fractile ratio = loss-if-idle / (loss-if-idle + save-if-used). Low ratio = OD premium is fat and salvage is healthy, commit aggressively. High ratio = salvage is thin, commit conservatively.">FRACTILE RATIO</th>
-                      <th style={th()} title="weak-case demand at the reference window (m6-m18 average) — the safe floor">WEAK D</th>
-                      <th style={th()} title="base-case demand at the reference window">BASE D</th>
-                      <th style={th()} title="strong-case demand at the reference window">STRONG D</th>
-                      <th style={th()} title="fractile-implied commit level — the size the engine is willing to pre-commit to (SIGN + LADDER combined)">COMMIT</th>
-                      <th style={th("left")} title="tranche decomposition: SIGN = weak-covered floor (safe today), LADDER = commit − weak (trigger-signed), FLEX = strong − commit (never commit)">SIGN · LADDER · FLEX</th>
+                    <thead style={{ position: "sticky", top: 0, background: "#0f172a", zIndex: 1 }}><tr>
+                      <th style={{ ...th("left"), background: "#0f172a" }}>BUCKET (chip · fabric · region)</th>
+                      <th style={{ ...th(), background: "#0f172a" }} title="representative reserved $/GPU-hr for this bucket (blended anchor from the supply book, or 75% of on-demand as a default). The engine sweeps per-term rates internally when scoring candidate deals — this column is just the fractile anchor.">RESERVED $/HR</th>
+                      <th style={{ ...th(), background: "#0f172a" }} title="on-demand upstream $/GPU-hr — what you'd pay if you didn't commit">OD $/HR</th>
+                      <th style={{ ...th(), background: "#0f172a" }} title="salvage $/GPU-hr — what you can recover on secondary market if the GPU sits idle">SALVAGE $/HR</th>
+                      <th style={{ ...th(), background: "#0f172a" }} title="fractile ratio = loss-if-idle / (loss-if-idle + save-if-used). The newsvendor critical fractile: commit up to the demand level D where P(demand ≥ D) ≥ fractile.">FRACTILE RATIO</th>
+                      <th style={{ ...th(), background: "#0f172a" }} title="weak-case demand at the reference window (m6-m18 average) — the safe floor">WEAK D</th>
+                      <th style={{ ...th(), background: "#0f172a" }} title="base-case demand at the reference window">BASE D</th>
+                      <th style={{ ...th(), background: "#0f172a" }} title="strong-case demand at the reference window">STRONG D</th>
+                      <th style={{ ...th(), background: "#0f172a" }} title="fractile-implied commit level — snapped to the largest scenario D such that P(D ≥ D) ≥ fractile (strict discrete newsvendor)">COMMIT</th>
+                      <th style={{ ...th("left"), background: "#0f172a" }} title="tranche decomposition: SIGN = weak-covered floor (safe today), LADDER = commit − weak (trigger-signed), FLEX = strong − commit (never committed)">SIGN · LADDER · FLEX</th>
                     </tr></thead>
                     <tbody>
                       {rows.map(cl => (
@@ -2216,13 +2577,20 @@ function App() {
                   </table>
                 </div>
                 <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.4)", marginTop: 10, lineHeight: 1.65 }}>
-                  <b style={{ color: "#e2e8f0" }}>What this table answers:</b> "for each (chip · fabric · region) bucket, how many GPUs should we be willing to pre-commit to on long-term contracts, vs. leave for on-demand or spot?" Every SIGN or LADDER row in the recommendations table below is sized against these numbers.
+                  <b style={{ color: "#e2e8f0" }}>Newsvendor model.</b> Sizing here uses the classical <b>newsvendor</b> framework — the same math a paper vendor uses to decide how many copies to stock each morning under uncertain demand. Every reserved GPU carries two competing costs: <b style={{ color: "#6ee7b7" }}>save-if-used</b> = OD rate − reserved rate (what you save vs. paying hourly on-demand) and <b style={{ color: "#f87171" }}>loss-if-idle</b> = reserved rate − salvage (what you waste on an unused GPU that only recovers secondary-market value). The <b style={{ color: AMB }}>FRACTILE RATIO</b> = loss / (loss + save) is the critical newsvendor threshold: commit up to the demand level Q* such that P(demand ≥ Q*) = fractile.
                   <br/><br/>
-                  <b style={{ color: "#e2e8f0" }}>The core trade-off:</b> committing to a GPU means paying full contract rate whether or not it gets sold. If demand shows up you win the SAVE-IF-USED (reserved rate is cheaper than sourcing on-demand); if it doesn't, you eat the LOSS-IF-IDLE (paying full rate for a GPU that only recovers salvage value on the secondary market). The <b style={{ color: AMB }}>FRACTILE RATIO</b> = loss-if-idle / (loss-if-idle + save-if-used) is the odds cutoff: the highest demand level D such that P(demand ≥ D) ≥ fractile ratio is the size you should commit to.
+                  <b style={{ color: "#e2e8f0" }}>Direction.</b> <b style={{ color: "#f87171" }}>High fractile</b> (loss dominates) → commit less; only where demand is highly certain. <b style={{ color: "#6ee7b7" }}>Low fractile</b> (save dominates) → commit aggressively; upside is big and downside is thin. Longer term = bigger discount → lower reserved rate → smaller loss + bigger save → lower fractile → commit more. That's why 60mo naturally wants a bigger commit than 12mo. The ratio just balances the three prices (reserved, OD, salvage) — "high" or "low" reflects that specific chip's economics, not any attribute like age or form factor.
                   <br/><br/>
-                  <b style={{ color: "#e2e8f0" }}>Reading it by chip:</b> a <b style={{ color: "#6ee7b7" }}>low ratio (&lt;35%)</b> shows up on liquid chips with fat on-demand premiums (H100, H200) — stranding hurts less than paying OD, so commit through the base scenario. A <b style={{ color: AMB }}>moderate ratio (35-50%)</b> is a balanced chip — commit near base. A <b style={{ color: "#f87171" }}>high ratio (&gt;50%)</b> flags obsolescence-prone or illiquid silicon (rack-scale B300 with weak secondary markets) — commit only through the weak scenario to keep stranding risk contained.
+                  <b style={{ color: "#e2e8f0" }}>Three-scenario discretization.</b> With only weak / base / strong scenarios, P(D ≥ Q) isn't a smooth curve — it's a step function:
+                  <ul style={{ margin: "4px 0 0 20px", padding: 0, lineHeight: 1.55 }}>
+                    <li>Q ≤ weak: <b>P = 1.0</b> (every scenario covers this)</li>
+                    <li>weak &lt; Q ≤ base: <b>P = 0.75</b> (base + strong cover this)</li>
+                    <li>base &lt; Q ≤ strong: <b>P = 0.25</b> (only strong covers this)</li>
+                    <li>Q &gt; strong: <b>P = 0</b></li>
+                  </ul>
+                  So COMMIT snaps to the largest scenario level that still satisfies the fractile: fractile in (75%, 100%] → weak; fractile in (25%, 75%] → base; fractile in [0%, 25%] → strong. Any two fractiles that fall in the same bin land at the same COMMIT. Term-length differentiation for the actual buy decision therefore lives in the <b>recommendations table's</b> excess-EV-per-prepaid-$ sweep across (term × vendor), not in this table's tranche sizing. The RESERVED $/HR column shows a representative blended anchor; the engine internally sweeps per-term rates from the Vendor Spec discount curve.
                   <br/><br/>
-                  <b style={{ color: "#e2e8f0" }}>How the commit splits into tranches:</b> <b style={{ color: "#6ee7b7" }}>SIGN</b> = weak-covered floor (sign today, safe in every scenario — turns into SIGN recommendations); <b style={{ color: "#67e8f9" }}>LADDER</b> = commit − weak (sign at mo 6 only if base trajectory confirms — turns into LADDER recommendations, cost-free under weak because we never actually sign); <b style={{ color: "rgba(255,255,255,0.55)" }}>FLEX</b> = strong − commit (never pre-commit — that demand rides on OD/spot). Rows are grouped by chip capability (B300 first → L40S last), then fabric class, then region.
+                  <b style={{ color: "#e2e8f0" }}>Tranches.</b> <b style={{ color: "#6ee7b7" }}>SIGN</b> = weak floor (sign today, safe in every scenario). <b style={{ color: "#67e8f9" }}>LADDER</b> = commit − weak (sign at mo 6 only if base trajectory confirms — cost-free under weak because we never actually sign). <b style={{ color: "rgba(255,255,255,0.55)" }}>FLEX</b> = strong − commit (never committed — rides on OD/spot). Rows grouped by chip capability (B300 → L40S), then fabric class, then region.
                 </div>
               </>
             );
@@ -2245,16 +2613,17 @@ function App() {
           }
         >
           {(() => {
-            const actColor = { sign: "#6ee7b7", renew: "#6ee7b7", "renew-partial": AMB, ladder: "#67e8f9", defer: "#a78bfa", lapse: "rgba(255,255,255,0.55)", decline: "#f87171" };
-            const actOrder = { sign: 0, ladder: 1, defer: 2, renew: 3, "renew-partial": 4, lapse: 5, decline: 6 };
+            const actColor = { sign: "#6ee7b7", renew: "#6ee7b7", "renew-partial": AMB, ladder: "#67e8f9", defer: "#a78bfa", "on-demand": "#94a3b8", lapse: "rgba(255,255,255,0.55)", decline: "#f87171" };
+            const actOrder = { sign: 0, ladder: 1, defer: 2, "on-demand": 3, renew: 4, "renew-partial": 5, lapse: 6, decline: 7 };
             const rows = [...recommendations].sort((a, b) => (actOrder[a.action] ?? 9) - (actOrder[b.action] ?? 9) || (b.evPerDollar || 0) - (a.evPerDollar || 0));
             const activeRows = rows.filter(r => r.action !== "decline");
             const declinedRows = rows.filter(r => r.action === "decline");
-            const btnLabel = { sign: "ADD TO BOOK", ladder: "ADD (TRIGGER)", defer: null, renew: "EXTEND", "renew-partial": "EXTEND ½", lapse: "REMOVE", decline: null };
+            const btnLabel = { sign: "ADD TO BOOK", ladder: "ADD (TRIGGER)", defer: null, "on-demand": "ADD OD BUY", renew: "EXTEND", "renew-partial": "EXTEND ½", lapse: "REMOVE", decline: null };
             const timingLabel = (r) => {
               if (r.action === "sign") return "now";
               if (r.action === "ladder") return "mo 6 (trigger)";
               if (r.action === "defer") return "mo " + (r.deferAt || "?");
+              if (r.action === "on-demand") return "flexible";
               if (r.action === "renew" || r.action === "renew-partial") return "at expiry";
               if (r.action === "lapse") return "at expiry";
               return "—";
@@ -2266,13 +2635,13 @@ function App() {
                 <th style={th("left")}>VENDOR</th>
                 <th style={th("left")}>GPU · FABRIC · REGION</th>
                 <th style={th()}>SIZE (H100e)</th>
-                <th style={th()}>TERM</th>
-                <th style={th()}>$/HR</th>
+                <th style={th()} title="reservation length. Engine sweeps 12/36/60mo (safe tranche) or 12/36mo (ladder) and picks the term with the highest EV per dollar prepaid. Longer terms cut $/hr via the discount curve (Vendor Spec tab) but tie up prepaid capital and expose more months to price decline. Hover the winning term for the runners-up.">TERM</th>
+                <th style={th()} title="reserved rate the vendor would quote at the winning term = on-demand catalog rate × (1 − term discount from Vendor Spec tab) × operator tier multiplier (Platinum +6% / Gold +3% / Silver flat). Hover the cell for the on-demand and discount breakdown.">$/HR</th>
                 <th style={th()} title="total contract value: gpus × $/hr × 730 × term months. For RENEW/RENEW-½: the incremental cost of the extension only. For DEFER: full contract value at future sign date. For DECLINE: counterfactual (what the deal would have cost had we signed).">TOTAL COST</th>
                 <th style={th()} title="upfront cash at signing: upfront% × total contract value. The prepaid capital that gets tied up.">UPFRONT</th>
                 <th style={th()}>EV</th>
                 <th style={th()}>BASE-CASE EV</th>
-                <th style={th()} title="expected value per dollar of prepaid capital (upfront cash at signing) — capital efficiency of the commitment">EV / $ PREPAID</th>
+                <th style={th()} title="the engine's primary ranking metric. Excess expected profit ABOVE the on-demand baseline, per dollar of prepaid capital. Positive → locking in the reserved deal beats staying flexible on OD by that much per capital dollar committed. Negative → the deal loses to OD; the engine picks ON-DEMAND (or DECLINE if OD is also unprofitable). Treats on-demand as the do-nothing benchmark every reserved candidate has to beat.">EV vs OD / $ PREPAID</th>
                 {extraCol ? <th style={th("left")} title="which gate rejected this deal">WHY DECLINED</th> : <th style={th("center")}></th>}
               </tr></thead>
             );
@@ -2282,6 +2651,7 @@ function App() {
               const vendorName = r.vendor?.name || r.deal?.provider || "—";
               const term = r.termMo || r.deal?.termMo || 0;
               const canApply = btnLabel[r.action] != null;
+              const isOD = r.action === "on-demand";
               let totalCost = 0, upfrontCost = 0, costIsCounterfactual = false;
               if (r.action === "sign" || r.action === "ladder" || r.action === "defer") {
                 totalCost = (r.gpus || 0) * (r.rate || 0) * HRS_MO * (r.termMo || 0);
@@ -2297,26 +2667,51 @@ function App() {
               }
               const costColor = costIsCounterfactual ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.7)";
               const upfrontColor = costIsCounterfactual ? "rgba(255,255,255,0.3)" : (upfrontCost > 0 ? AMB : "rgba(255,255,255,0.35)");
-              const timingColor = r.action === "defer" ? "#a78bfa" : r.action === "ladder" ? "#67e8f9" : r.action === "sign" ? "#6ee7b7" : "rgba(255,255,255,0.5)";
+              const timingColor = r.action === "defer" ? "#a78bfa" : r.action === "ladder" ? "#67e8f9" : r.action === "sign" ? "#6ee7b7" : isOD ? "#94a3b8" : "rgba(255,255,255,0.5)";
+              // For OD rows: EV per prepaid$ is undefined (no prepay). The
+              // ranking metric — excess EV / $ prepaid — is 0 for OD by
+              // definition (OD is its own benchmark), so we render it as such.
+              const rankMetric = isOD ? 0 : (r.excessEvPerDollar ?? 0);
               return (
                 <tr key={r.id}>
                   <td style={td({ color: actColor[r.action] || "#e2e8f0", fontWeight: 700, letterSpacing: "0.05em", fontSize: 9.5, textTransform: "uppercase" })}>{r.action}</td>
                   <td style={td({ color: timingColor, whiteSpace: "nowrap", fontSize: 9.5, fontWeight: 600 })} title={r.trigger || ""}>{timingLabel(r)}</td>
                   <td style={td({ color: "#e2e8f0", whiteSpace: "nowrap", fontSize: 10.5 })}>
-                    <CmaxBadge provider={vendorName} dot />{vendorName}
+                    {isOD ? (
+                      <span style={{ color: r.odRank > 0 ? "rgba(148,163,184,0.75)" : "#e2e8f0", fontWeight: r.odRank > 0 ? 400 : 600 }}>
+                        {vendorName}
+                        {r.odRank > 0 && <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 9, marginLeft: 4 }}>· alt #{r.odRank}</span>}
+                      </span>
+                    ) : (
+                      <><CmaxBadge provider={vendorName} dot />{vendorName}</>
+                    )}
                   </td>
                   <td style={td({ color: "#e2e8f0", whiteSpace: "nowrap" })}>
                     <span style={{ fontWeight: 600 }}>{SUPPLY_GPUS[r.gpu]?.label.split(" ")[0] || r.gpu}</span>
                     <span style={{ color: "rgba(255,255,255,0.4)", fontSize: 9.5 }}> · {r.fab} · {r.region}</span>
                   </td>
                   <td style={td({ textAlign: "right", color: AMB, fontWeight: 600 })}>{fmtBig(Math.round(r.targetH100e))}</td>
-                  <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{term > 0 ? term + "mo" : "—"}</td>
-                  <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })}>{price > 0 ? fmtUSD(price, 2) : "—"}</td>
-                  <td style={td({ textAlign: "right", color: costColor })} title={costIsCounterfactual ? "counterfactual — deal was declined; this is what it would have cost" : (r.action === "renew" || r.action === "renew-partial" ? "incremental cost of the extension" : "")}>{totalCost > 0 ? fmtUSD(totalCost) : "—"}</td>
-                  <td style={td({ textAlign: "right", color: upfrontColor, fontWeight: upfrontCost > 0 && !costIsCounterfactual ? 600 : 400 })} title={costIsCounterfactual ? "counterfactual upfront" : "prepaid cash at signing"}>{totalCost > 0 ? (upfrontCost > 0 ? fmtUSD(upfrontCost) : "$0") : "—"}</td>
+                  <td style={td({ textAlign: "right", color: isOD ? "#94a3b8" : "rgba(255,255,255,0.55)", fontWeight: isOD ? 600 : 400 })} title={(() => {
+                    if (isOD) {
+                      const b = r.bestReservedRejected;
+                      if (!b) return "On-demand has no term commitment — you pay hourly with no lock-in.";
+                      const ex = (b.excessEvPerDollar || 0);
+                      return `On-demand has no term commitment — you pay hourly with no lock-in. Best reserved alternative that lost to OD: ${b.termMo}mo at ${b.vendor?.name || "?"} — would have earned ${ex >= 0 ? "+" : "−"}$${Math.abs(ex).toFixed(3)} of extra profit per $1 of prepaid capital vs. staying on OD (negative → locking in loses value here).`;
+                    }
+                    if (!r.termAlternates?.length) return term > 0 ? `${term}mo — the only term evaluated for this tranche (safe sweeps 12/36/60mo, ladder sweeps 12/36mo).` : "";
+                    const alts = r.termAlternates.map(a => {
+                      const ex = (a.excessEvPerDollar || 0);
+                      const sign = ex >= 0 ? "+" : "−";
+                      return `• ${a.termMo}mo term: reserved rate $${(a.rate || 0).toFixed(2)}/hr — would earn ${sign}$${Math.abs(ex).toFixed(3)} of extra profit per $1 of prepaid capital vs. staying on OD`;
+                    }).join("\n");
+                    return `Winning term across the sweep. Runner-up terms considered:\n${alts}`;
+                  })()}>{isOD ? "flex" : (term > 0 ? term + "mo" : "—")}</td>
+                  <td style={td({ textAlign: "right", color: "rgba(255,255,255,0.55)" })} title={isOD ? `on-demand catalog rate — pay only for hours delivered, no lock-in, no prepay` : (r.odRate ? `$${r.odRate.toFixed(2)}/hr on-demand (vendor catalog rate) × (1 − ${((r.termDiscount || 0) * 100).toFixed(1)}% ${term}mo discount) × operator tier multiplier` : "")}>{price > 0 ? fmtUSD(price, 2) : "—"}</td>
+                  <td style={td({ textAlign: "right", color: isOD ? "#94a3b8" : costColor })} title={isOD ? "on-demand cost varies with delivered hours — no fixed commitment" : (costIsCounterfactual ? "counterfactual — deal was declined; this is what it would have cost" : (r.action === "renew" || r.action === "renew-partial" ? "incremental cost of the extension" : ""))}>{isOD ? "variable" : (totalCost > 0 ? fmtUSD(totalCost) : "—")}</td>
+                  <td style={td({ textAlign: "right", color: isOD ? "#94a3b8" : upfrontColor, fontWeight: upfrontCost > 0 && !costIsCounterfactual ? 600 : 400 })} title={isOD ? "on-demand has no prepay — full flexibility" : (costIsCounterfactual ? "counterfactual upfront" : "prepaid cash at signing")}>{isOD ? "$0" : (totalCost > 0 ? (upfrontCost > 0 ? fmtUSD(upfrontCost) : "$0") : "—")}</td>
                   <td style={td({ textAlign: "right", color: (r.EV || 0) >= 0 ? "#6ee7b7" : "#f87171" })}>{r.EV != null ? ((r.EV >= 0 ? "+" : "−") + fmtUSD(Math.abs(r.EV))) : "—"}</td>
                   <td style={td({ textAlign: "right", color: baseEV >= 0 ? "#e2e8f0" : "#f87171" })}>{r.perScenario ? ((baseEV >= 0 ? "+" : "−") + fmtUSD(Math.abs(baseEV))) : "—"}</td>
-                  <td style={td({ textAlign: "right", color: (r.evPerDollar || 0) > 0 ? "#6ee7b7" : "rgba(255,255,255,0.45)", fontWeight: 600 })}>{r.evPerDollar ? (r.evPerDollar >= 0 ? "+" : "") + r.evPerDollar.toFixed(2) + "×" : "—"}</td>
+                  <td style={td({ textAlign: "right", color: isOD ? "#94a3b8" : (rankMetric > 0 ? "#6ee7b7" : "#f87171"), fontWeight: 600 })} title={isOD ? "on-demand is the benchmark — excess vs. itself is 0 by definition. Reserved candidates must beat this to be picked." : (r.evOD != null ? `reserved EV $${((r.EV || 0) / 1e6).toFixed(2)}M − OD baseline EV $${((r.evOD || 0) / 1e6).toFixed(2)}M = excess $${(((r.EV || 0) - (r.evOD || 0)) / 1e6).toFixed(2)}M over ${term}mo; divide by $${((r.prepaid || 0) / 1e6).toFixed(2)}M prepaid → ${(rankMetric >= 0 ? "+" : "") + rankMetric.toFixed(3)}× — positive means signing beats staying on OD` : "")}>{isOD ? "baseline" : ((rankMetric >= 0 ? "+" : "") + rankMetric.toFixed(2) + "×")}</td>
                   {showWhy ? (
                     <td style={td({ color: "#f87171", fontSize: 9, lineHeight: 1.35, maxWidth: 260 })} title={r.declineReason || ""}>{r.declineReason || "—"}</td>
                   ) : (
@@ -2355,22 +2750,23 @@ function App() {
                   </details>
                 )}
                 <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.4)", marginTop: 10, lineHeight: 1.65 }}>
-                  <b style={{ color: "#e2e8f0" }}>What each row is:</b> a concrete deal action the engine wants you to take on one supply bucket. Actions come in six flavors, sorted top-to-bottom in that priority:
+                  <b style={{ color: "#e2e8f0" }}>What each row is:</b> a concrete deal action the engine wants you to take on one supply bucket. Actions come in seven flavors, sorted top-to-bottom in that priority:
                   <br/>
                   <span style={{ color: "#6ee7b7", fontWeight: 700 }}>SIGN</span> — commit today to the safe floor (sized to WEAK demand at the reference window; utilizes fully in every scenario).
                   {" "}<span style={{ color: "#67e8f9", fontWeight: 700 }}>LADDER</span> — a conditional commitment: don't sign now, but if actuals-to-date at month 6 confirm the base trajectory, THEN sign the increment above the safe floor (up to the fractile-implied commit level).
                   {" "}<span style={{ color: "#a78bfa", fontWeight: 700 }}>DEFER</span> — an otherwise-clean SIGN/LADDER that breaches the total-spend cap TODAY, but fits at a specific future month once existing positions roll off enough to free the headroom. SIGN DATE column shows when. Deal economics unchanged (same term, rate, size) — you're just waiting for balance-sheet room.
+                  {" "}<span style={{ color: "#94a3b8", fontWeight: 700 }}>ON-DEMAND</span> — no reserved term at any vendor beats the on-demand baseline on excess-EV-per-prepaid-dollar. Stay flexible: pay OD hourly, no lock-in, no prepay. Each OD-winning bucket emits a primary row (cheapest catalog vendor for that GPU · fabric · region) plus up to 2 alternate rows. Clicking ADD OD BUY inserts an OD-structured entry into the supply book so the intent shows up above.
                   {" "}<span style={{ color: "#6ee7b7", fontWeight: 700 }}>RENEW</span> / <span style={{ color: AMB, fontWeight: 700 }}>RENEW-PARTIAL</span> — an existing position expires inside the 24-month horizon and weak/base demand still supports keeping it (full or half term).
                   {" "}<span style={{ color: "rgba(255,255,255,0.55)", fontWeight: 700 }}>LAPSE</span> — an existing position expires and there isn't enough demand to justify renewing.
-                  {" "}<span style={{ color: "#f87171", fontWeight: 700 }}>DECLINE</span> — the engine considered a deal and rejected it outright (see gates below).
+                  {" "}<span style={{ color: "#f87171", fontWeight: 700 }}>DECLINE</span> — the engine considered a deal, saw every reserved term lose to OD, AND found OD itself unprofitable at this bucket. Nothing to do — don't sign, don't even cover on OD (sell rate {'<'} OD rate under the scenario weights).
                   <br/><br/>
                   <b style={{ color: "#e2e8f0" }}>How to read the numbers:</b>
                   <ul style={{ margin: "4px 0 4px 20px", padding: 0, lineHeight: 1.6 }}>
-                    <li><b>SIGN DATE</b> = when the deal actually gets signed. <span style={{ color: "#6ee7b7" }}>now</span> for SIGN; <span style={{ color: "#67e8f9" }}>mo 6 (trigger)</span> for LADDER; <span style={{ color: "#a78bfa" }}>mo N</span> for DEFER — the earliest month where existing-book obligation drops enough to admit the deal under the ${totalSpendCapM.toLocaleString()}M spend cap, with earlier defers in this pass layered on top so later ones push further out. <b>SIZE</b> = H100-equivalent capacity of the candidate. <b>TERM</b> = commitment length in months from the sign date. <b>$/HR</b> = the offered rate per physical GPU-hour.</li>
+                    <li><b>SIGN DATE</b> = when the deal actually gets signed. <span style={{ color: "#6ee7b7" }}>now</span> for SIGN; <span style={{ color: "#67e8f9" }}>mo 6 (trigger)</span> for LADDER; <span style={{ color: "#a78bfa" }}>mo N</span> for DEFER — the earliest month where existing-book obligation drops enough to admit the deal under the ${totalSpendCapM.toLocaleString()}M spend cap, with earlier defers in this pass layered on top so later ones push further out. <b>SIZE</b> = H100-equivalent capacity of the candidate. <b>TERM</b> = commitment length in months from the sign date. The engine sweeps 12/36/60mo (SAFE tranche) or 12/36mo (LADDER) per bucket-vendor pair and picks the term with the highest EV per dollar prepaid — longer terms cut $/hr via the discount curve (Vendor Spec tab) but tie up prepaid capital and expose more months to price decline. Hover the winning term to see runner-up terms. <b>$/HR</b> = reserved rate at the winning term = on-demand catalog rate × (1 − term discount) × operator tier multiplier. Hover for the breakdown.</li>
                     <li><b>TOTAL COST</b> = full contract value paid upstream over the term (gpus × $/hr × 730 × term). For RENEW / RENEW-½ it's the incremental cost of the extension only. For DEFER it's the full contract value at the future sign date. For DECLINE it's counterfactual (muted) — the deal wasn't signed. <b>UPFRONT</b> = prepaid cash at signing (upfront% × total cost) — the capital that actually gets tied up.</li>
                     <li><b>EV</b> = probability-weighted expected profit over the deal's term. Σ P(s) × profit_s across weak/base/strong. The priors P(s) are set on the Compute Demand tab next to the scenario toggle.</li>
                     <li><b>BASE-CASE EV</b> = the profit this deal delivers if the base scenario actually plays out. It's the "central expectation" version of EV; usually higher than EV because the weak scenario drags the probability-weighted average down.</li>
-                    <li><b>EV / $ PREPAID</b> = expected profit per dollar of upfront cash committed at signing. The primary ranking metric — measures how efficiently each locked-up dollar buys future profit. A 2× value means each $ of prepay is expected to return $2 of profit over the term.</li>
+                    <li><b>EV vs OD / $ PREPAID</b> = the engine's primary ranking metric. Expected profit ABOVE the on-demand baseline, per dollar of prepaid capital. It answers "does locking capital in this reserved deal beat sitting flexibly on OD, and by how much per dollar committed?" — a positive value means the reserved deal wins by that many dollars-of-excess-profit per dollar-of-prepay; a negative value means OD beats it and the engine picks ON-DEMAND. This differs from raw EV per prepaid dollar because it nets out the profit you'd earn anyway on OD — a deal that returns $2 EV per prepaid $ is only impressive if the OD alternative would have returned less than $2. For OD rows the metric shows "baseline" — OD is the benchmark, so its excess vs. itself is zero by definition.</li>
                   </ul>
                   <b style={{ color: "#e2e8f0" }}>Why a candidate flips to DEFER vs DECLINE:</b> if a SIGN or LADDER passes every gate EXCEPT the total-spend cap, the engine tries to defer — searching month-by-month for the earliest sign date where existing-book obligation has rolled off enough to fit the new deal under the cap. If a feasible month exists within 24 months → DEFER (informational — no book action taken, you revisit at that date). If not, or if any OTHER gate trips ({'>'}40% vendor concentration once the projected book exceeds 2,000 GPUs, cumulative prepaid capital ≥ {prepaidCapPct}% of ARR, Bronze operator prepaid ≥ 10% of ARR, plain Ethernet on a non-inference chip, or the deal fails its own margin gate — SIGN at weak-case, LADDER at base-case) → DECLINE. The engine is not obliged to fill every gap — DEFER and DECLINE are peer options, not fallbacks (an optimizer forced to fill every gap overpays in tight markets).
                   <br/><br/>
@@ -3595,85 +3991,8 @@ const INTERCONNECTS = {
 };
 const IC_ORDER = ["nvlink5", "nvlink4", "pcie", "ib_xdr", "ib_ndr", "spectrumx", "roce", "ualink", "eth"];
 
-// ─── Vendor SKU catalog — computeprices.com aggregator snapshot, Jul 2026 ────
-// Per-GPU-hour prices scraped from computeprices.com detail pages for H100 SXM,
-// H200, B200, HGX B300, A100 SXM 80GB, and L40S — the six data-center GPUs used
-// for large-scale AI workloads. Same nominal GPU differs sharply across
-// providers: node interconnect, scale-out fabric, region, and operator quality
-// (ClusterMAX) all vary even when "H100" is the headline spec.
-const CATALOG = [
-  // ─── H100 SXM (80 GB, HGX 8×) ───────────────────────────────────────────────
-  { id: 1,  provider: "CoreWeave",       gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.46,  kwh: 0.07,  pue: 1.15, storage: "VAST / local NVMe",     storageAdd: 0.05, egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "64",           resale: true,  notes: "HGX H100 SXM5; dedicated tenancy; IB NDR scale-out" },
-  { id: 2,  provider: "Voltage Park",    gpu: "H100",    region: "US-Central",     node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.99,  kwh: 0.055, pue: 1.3,  storage: "Local NVMe",            storageAdd: 0.05, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "Bare-metal, no virtualization overhead" },
-  { id: 3,  provider: "Hyperstack",      gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.90,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.03, egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "US and Canada regions; on-demand 8× bare metal" },
-  { id: 4,  provider: "Denvr Dataworks",  gpu: "H100",   region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.30,  kwh: 0.065, pue: 1.2,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "Sustainability focus; good PUE" },
-  { id: 5,  provider: "Latitude.sh",     gpu: "H100",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.79,  kwh: 0.07,  pue: 1.25, storage: "Local NVMe",            storageAdd: 0.04, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "Global footprint; competitive 8× rate; on-demand" },
-  { id: 6,  provider: "GMI Cloud",       gpu: "H100",    region: "APAC",           node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.00,  kwh: 0.08,  pue: 1.25, storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.02,  sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 3,  minCommit: "64",           resale: true,  notes: "Taiwan-sited; export-control screening applies" },
-  { id: 7,  provider: "Crusoe",          gpu: "H100",    region: "US-Central",     node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.90,  kwh: 0.045, pue: 1.2,  storage: "Lustre incl.",          storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "128",          resale: true,  notes: "Stranded-power / behind-the-meter; lowest kwh cost in class" },
-  { id: 8,  provider: "Nebius",          gpu: "H100",    region: "EU",             node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.87,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "EU-sited; hydro power; low PUE; spot ~$2.15/GPU-hr" },
-  { id: 9,  provider: "Vultr",           gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.30,  kwh: 0.08,  pue: 1.25, storage: "Block / object",        storageAdd: 0.06, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "8× bare-metal H100; on-demand with no long-term commit" },
-  { id: 10, provider: "Scaleway",        gpu: "H100",    region: "EU",             node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.62,  kwh: 0.06,  pue: 1.15, storage: "Object storage",        storageAdd: 0.04, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 2,  minCommit: "8",            resale: true,  notes: "French DC; EU data residency; hydro-heavy grid" },
-  { id: 11, provider: "DigitalOcean",    gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.99,  kwh: 0.08,  pue: 1.25, storage: "Spaces (object)",       storageAdd: 0.05, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "On-demand H100 cluster; good developer UX; IB network" },
-  { id: 12, provider: "RunPod",          gpu: "H100",    region: "Global (mixed)", node: 8,  ic: "nvlink4", outFabric: "roce",      price: 2.99,  kwh: 0.08,  pue: 1.3,  storage: "Network vol. (extra)",  storageAdd: 0.05, egress: 0,     sla: 99.0, support: "community", tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "Secure Cloud; distributed host network; spot ~$2.39" },
-  { id: 13, provider: "Civo",            gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.99,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.04, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "none (commit tiers)", resale: true, notes: "On-demand $2.99; 6mo→$2.79, 12mo→$2.69, 24mo→$2.59, 36mo→$2.49" },
-  { id: 14, provider: "Lambda Labs",     gpu: "H100",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.99,  kwh: 0.06,  pue: 1.25, storage: "Local NVMe",            storageAdd: 0.05, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "1-Click Cluster; IB scale-out; ML-first UX" },
-  { id: 15, provider: "GCP",             gpu: "H100",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.20,  kwh: 0.085, pue: 1.1,  storage: "Filestore / GCS",       storageAdd: 0.14, egress: 0.08,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "A3 Mega (8× SXM5); 1-yr CUD ~30% off; spot ~$1.15/GPU-hr" },
-  { id: 16, provider: "Azure",           gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 6.98,  kwh: 0.09,  pue: 1.18, storage: "Azure Files Premium",   storageAdd: 0.15, egress: 0.087, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "ND H100 v5; 1-yr reserved ~$5.80, 3-yr ~$4.30" },
-  { id: 17, provider: "AWS",             gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "eth",       price: 6.88,  kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "P5 (8× H100); EFA (Ethernet-based RDMA, not IB); spot ~$0.83/GPU-hr" },
-  { id: 18, provider: "OCI",             gpu: "H100",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 10.00, kwh: 0.07,  pue: 1.15, storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "BM.GPU4.8; high sticker; generous egress/storage credits in deals" },
-
-  // ─── H200 (141 GB, HGX 8×) ──────────────────────────────────────────────────
-  { id: 19, provider: "CoreWeave",       gpu: "H200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.62,  kwh: 0.07,  pue: 1.15, storage: "VAST / local NVMe",     storageAdd: 0.05, egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "HGX H200 SXM5; 141GB HBM3e — ~33% more memory than H100" },
-  { id: 20, provider: "GMI Cloud",       gpu: "H200",    region: "APAC",           node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.60,  kwh: 0.08,  pue: 1.25, storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.02,  sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 3,  minCommit: "64",           resale: true,  notes: "Taiwan-sited H200; export-control screening applies" },
-  { id: 21, provider: "Hyperstack",      gpu: "H200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.99,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.03, egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "8",            resale: true,  notes: "On-demand H200 8-GPU; standard HGX form factor" },
-  { id: 22, provider: "Crusoe",          gpu: "H200",    region: "US-Central",     node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.29,  kwh: 0.045, pue: 1.2,  storage: "Lustre incl.",          storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "128",          resale: true,  notes: "Behind-the-meter siting; premium H200 pricing vs H100" },
-  { id: 23, provider: "Nebius",          gpu: "H200",    region: "EU",             node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.52,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 3,  minCommit: "64",           resale: true,  notes: "EU-sited; hydro power; spot ~$2.45/GPU-hr" },
-  { id: 24, provider: "DigitalOcean",    gpu: "H200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.44,  kwh: 0.08,  pue: 1.25, storage: "Spaces (object)",       storageAdd: 0.05, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "On-demand H200; same platform as their H100 offering" },
-  { id: 25, provider: "RunPod",          gpu: "H200",    region: "Global (mixed)", node: 8,  ic: "nvlink4", outFabric: "roce",      price: 3.99,  kwh: 0.08,  pue: 1.3,  storage: "Network vol. (extra)",  storageAdd: 0.05, egress: 0,     sla: 99.0, support: "community", tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "Secure Cloud; community $3.59; spot ~$3.99" },
-  { id: 26, provider: "GCP",             gpu: "H200",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.58,  kwh: 0.085, pue: 1.1,  storage: "Filestore / GCS",       storageAdd: 0.14, egress: 0.08,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "A3 Ultra (8× H200 SXM5); spot ~$4.46/GPU-hr" },
-  { id: 27, provider: "AWS",             gpu: "H200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "eth",       price: 7.91,  kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "P5e (8× H200); EFA network; spot ~$2.23/GPU-hr" },
-  { id: 28, provider: "OCI",             gpu: "H200",    region: "Middle East",    node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 10.00, kwh: 0.07,  pue: 1.2,  storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "Middle East and EU regions; high sticker; deal credits common" },
-
-  // ─── B200 (192 GB, HGX 8× or NVL72 rack) ───────────────────────────────────
-  { id: 29, provider: "CoreWeave",       gpu: "B200",    region: "US-East",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 4.26,  kwh: 0.07,  pue: 1.15, storage: "VAST incl.",            storageAdd: 0,    egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 8,  minCommit: "1 rack (72)",  resale: true,  notes: "GB200 NVL72 rack-scale; liquid cooled; 1.8TB/s NVLink5 per GPU" },
-  { id: 30, provider: "Nebius",          gpu: "B200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.95,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "64",           resale: true,  notes: "HGX B200 8-GPU form factor (not NVL72); on-demand" },
-  { id: 31, provider: "GMI Cloud",       gpu: "B200",    region: "APAC",           node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.00,  kwh: 0.08,  pue: 1.25, storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.02,  sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 6,  minCommit: "64",           resale: true,  notes: "Taiwan-sited HGX B200; export-control screening applies" },
-  { id: 32, provider: "Vultr",           gpu: "B200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.50,  kwh: 0.08,  pue: 1.25, storage: "Block / object",        storageAdd: 0.06, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 2,  minCommit: "8",            resale: true,  notes: "HGX B200 8-GPU bare metal; on-demand; competitive vs peers" },
-  { id: 33, provider: "Hyperstack",      gpu: "B200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 6.00,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.03, egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "8",            resale: true,  notes: "HGX B200 8-GPU; on-demand availability" },
-  { id: 34, provider: "Lambda Labs",     gpu: "B200",    region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 6.69,  kwh: 0.06,  pue: 1.25, storage: "Local NVMe",            storageAdd: 0.05, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 2,  minCommit: "8",            resale: true,  notes: "1-Click Cluster; HGX B200; EU/APAC/ME regions available" },
-  { id: 35, provider: "RunPod",          gpu: "B200",    region: "Global (mixed)", node: 8,  ic: "nvlink4", outFabric: "roce",      price: 5.49,  kwh: 0.08,  pue: 1.3,  storage: "Network vol. (extra)",  storageAdd: 0.05, egress: 0,     sla: 99.0, support: "community", tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "Secure Cloud; community $5.98; on-demand $5.49" },
-  { id: 36, provider: "GCP",             gpu: "B200",    region: "US-West",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 8.05,  kwh: 0.085, pue: 1.1,  storage: "Filestore / GCS",       storageAdd: 0.14, egress: 0.08,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 6,  minCommit: "1yr reserve",  resale: false, notes: "A4 (GB200 NVL72) rack-scale; spot ~$4.08/GPU-hr" },
-  { id: 37, provider: "AWS",             gpu: "B200",    region: "US-East",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 14.24, kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "P6 (GB200 NVL72); highest on-demand sticker; spot ~$5.01/GPU-hr" },
-  { id: 38, provider: "OCI",             gpu: "B200",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 14.00, kwh: 0.07,  pue: 1.15, storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 4,  minCommit: "none",         resale: false, notes: "HGX B200; premium on-demand list; deal credits common" },
-
-  // ─── B300 / HGX B300 (Blackwell Ultra, 288 GB) ─────────────────────────────
-  { id: 39, provider: "CoreWeave",       gpu: "B300",    region: "US-East",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 4.48,  kwh: 0.07,  pue: 1.15, storage: "VAST incl.",            storageAdd: 0,    egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 16, minCommit: "1 rack (72)",  resale: true,  notes: "GB300 NVL72 rack-scale; 288GB HBM3e per GPU; long lead time" },
-  { id: 40, provider: "Vultr",           gpu: "B300",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.80,  kwh: 0.08,  pue: 1.25, storage: "Block / object",        storageAdd: 0.06, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 4,  minCommit: "8",            resale: true,  notes: "HGX B300 8-GPU; unusually low on-demand price for Blackwell Ultra" },
-  { id: 41, provider: "Nebius",          gpu: "B300",    region: "EU",             node: 8,  ic: "nvlink5", outFabric: "ib_xdr",    price: 4.30,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 8,  minCommit: "64",           resale: true,  notes: "EU-sited B300; UK availability; spot ~$4.30" },
-  { id: 42, provider: "RunPod",          gpu: "B300",    region: "Global (mixed)", node: 8,  ic: "nvlink4", outFabric: "roce",      price: 7.39,  kwh: 0.08,  pue: 1.3,  storage: "Network vol. (extra)",  storageAdd: 0.05, egress: 0,     sla: 99.0, support: "community", tenancy: "bare metal", leadWks: 0,  minCommit: "none",         resale: true,  notes: "Secure Cloud; community $6.94; on-demand $7.39" },
-  { id: 43, provider: "Scaleway",        gpu: "B300",    region: "EU",             node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 9.01,  kwh: 0.06,  pue: 1.15, storage: "Object storage",        storageAdd: 0.04, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 4,  minCommit: "8",            resale: true,  notes: "EU data residency; B300 8-GPU node; high list, no egress in-region" },
-  { id: 44, provider: "AWS",             gpu: "B300",    region: "US-East",        node: 72, ic: "nvlink5", outFabric: "ib_xdr",    price: 17.80, kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "Blackwell Ultra rack-scale; spot ~$3.72/GPU-hr (large spot discount)" },
-  { id: 45, provider: "OCI",             gpu: "B300",    region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 15.00, kwh: 0.07,  pue: 1.15, storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 6,  minCommit: "none",         resale: false, notes: "HGX B300 (Blackwell Ultra); premium enterprise list price" },
-
-  // ─── A100 SXM 80 GB (still widely used at scale) ───────────────────────────
-  { id: 46, provider: "CoreWeave",       gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.21,  kwh: 0.07,  pue: 1.2,  storage: "VAST / local NVMe",     storageAdd: 0.05, egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "64",           resale: true,  notes: "SXM4 A100; large installed base; proven reliability" },
-  { id: 47, provider: "Hyperstack",      gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.35,  kwh: 0.07,  pue: 1.2,  storage: "Object storage",        storageAdd: 0.03, egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "On-demand A100 SXM; US and Canada" },
-  { id: 48, provider: "Crusoe",          gpu: "A100_80", region: "US-Central",     node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.45,  kwh: 0.045, pue: 1.2,  storage: "Lustre incl.",          storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "128",          resale: true,  notes: "Behind-the-meter power; lowest effective operating cost in class" },
-  { id: 49, provider: "Denvr Dataworks",  gpu: "A100_80", region: "US-Central",    node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 0.58,  kwh: 0.065, pue: 1.2,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 4,  minCommit: "256 · 12mo",   resale: true,  notes: "Very aggressive rate — likely prepay or stranded-power deal" },
-  { id: 50, provider: "Lambda Labs",     gpu: "A100_80", region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 2.79,  kwh: 0.06,  pue: 1.25, storage: "Local NVMe",            storageAdd: 0.05, egress: 0,     sla: 99.0, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "On-demand A100 SXM; good for burst capacity" },
-  { id: 51, provider: "GCP",             gpu: "A100_80", region: "US-West",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 1.85,  kwh: 0.085, pue: 1.1,  storage: "Filestore / GCS",       storageAdd: 0.14, egress: 0.08,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "A2 Ultra (8× A100 SXM4); spot ~$1.39/GPU-hr; 1-yr CUD" },
-  { id: 52, provider: "AWS",             gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "eth",       price: 2.74,  kwh: 0.09,  pue: 1.15, storage: "FSx for Lustre",        storageAdd: 0.16, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "P4d (8× A100); EFA networking; spot ~$0.84/GPU-hr" },
-  { id: 53, provider: "Azure",           gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 3.67,  kwh: 0.09,  pue: 1.18, storage: "Azure Files Premium",   storageAdd: 0.15, egress: 0.087, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "NC A100 v4; 3-yr reserved ~$2.13; spot ~$0.40" },
-  { id: 54, provider: "OCI",             gpu: "A100_80", region: "US-East",        node: 8,  ic: "nvlink4", outFabric: "ib_ndr",    price: 4.00,  kwh: 0.07,  pue: 1.2,  storage: "Block / object",        storageAdd: 0.10, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "BM.GPU.A100-v2.8; premium list; deal credits common" },
-
-  // ─── L40S (inference-scale, PCIe — no NVLink) ──────────────────────────────
-  { id: 55, provider: "CoreWeave",       gpu: "L40S",    region: "US-East",        node: 8,  ic: "pcie",    outFabric: "ib_ndr",    price: 0.985, kwh: 0.07,  pue: 1.2,  storage: "VAST / local NVMe",     storageAdd: 0.05, egress: 0,     sla: 99.9, support: "24/7 eng",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "Inference-optimized; L40S has no NVLink — PCIe within node, IB across nodes" },
-  { id: 56, provider: "Nebius",          gpu: "L40S",    region: "EU",             node: 8,  ic: "pcie",    outFabric: "roce",      price: 1.55,  kwh: 0.05,  pue: 1.1,  storage: "Shared FS incl.",       storageAdd: 0,    egress: 0.01,  sla: 99.5, support: "24/7 eng",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: true,  notes: "EU-sited L40S; spot ~$0.75/GPU-hr; 4-GPU max node" },
-  { id: 57, provider: "Crusoe",          gpu: "L40S",    region: "US-Central",     node: 8,  ic: "pcie",    outFabric: "roce",      price: 1.45,  kwh: 0.045, pue: 1.2,  storage: "Lustre incl.",          storageAdd: 0,    egress: 0,     sla: 99.5, support: "24/7 eng",  tenancy: "bare metal", leadWks: 2,  minCommit: "64",           resale: true,  notes: "Behind-the-meter power; good economics for inference workloads" },
-  { id: 58, provider: "Scaleway",        gpu: "L40S",    region: "EU",             node: 8,  ic: "pcie",    outFabric: "ib_ndr",    price: 1.70,  kwh: 0.06,  pue: 1.15, storage: "Object storage",        storageAdd: 0.04, egress: 0.01,  sla: 99.5, support: "business",  tenancy: "bare metal", leadWks: 1,  minCommit: "8",            resale: true,  notes: "EU L40S; IB scale-out for multi-node tensor-parallel inference" },
-  { id: 59, provider: "AWS",             gpu: "L40S",    region: "US-East",        node: 8,  ic: "pcie",    outFabric: "eth",       price: 1.86,  kwh: 0.09,  pue: 1.15, storage: "EBS / S3",              storageAdd: 0.10, egress: 0.09,  sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "G6 (Ada Lovelace); serving-optimized; standard EBS/S3 storage" },
-  { id: 60, provider: "OCI",             gpu: "L40S",    region: "US-East",        node: 4,  ic: "pcie",    outFabric: "ib_ndr",    price: 3.50,  kwh: 0.07,  pue: 1.15, storage: "Block / object",        storageAdd: 0.08, egress: 0.085, sla: 99.9, support: "24/7 ent",  tenancy: "VM",         leadWks: 0,  minCommit: "none",         resale: false, notes: "L40S 4-GPU max node; enterprise support; high list" },
-];
+// Vendor SKU catalog is defined at module scope (see near top of file) so both
+// this app and the Supply Filling Engine can read from a single source of truth.
 
 // ── Price-sustainability floor: power + straight-line capex recovery ─────────
 // powerCost/hr = TDP × PUE × $/kWh × 1.15 (node non-GPU draw). Capex floor =
@@ -3804,6 +4123,7 @@ const ENTRANT_CHECKLIST = [
     "Power price ($/kWh) and PUE — is the quoted price/power IT load or total facility draw?",
     "Cooling class: is the peak FLOPS number real with the cooling I'm buying? (>700W chips can't sustain boost on air)",
     "Rack density vs existing electrical — 5–15 kW/rack halls need real retrofit for 100+ kW liquid racks",
+    "DC redundancy across power, cooling, and network paths: N = single point of failure; N+1 ≈ Uptime Tier III (survives one component fault); 2N ≈ Tier IV (fully duplicated). Long training runs need N+1 or better — one utility hiccup kills the checkpoint",
     "Region: data residency, export-control screening, latency to core demand geographies",
   ]},
   { stage: "5 · Storage & data", items: [
@@ -3875,6 +4195,7 @@ function App() {
   const [fIc, setFIc] = useState("all");
   const [sortKey, setSortKey] = useState("density");
   const [compare, setCompare] = useState([39, 41]); // CoreWeave B300 vs Nebius B300 — visible by default
+  const [disc, setDisc] = useBookStore(RESERVED_DISCOUNT_STORE);
 
   const rows = useMemo(() => {
     let r = CATALOG.filter(c =>
@@ -3951,6 +4272,79 @@ function App() {
           <div style={{ fontSize: 9, color: "rgba(255,255,255,0.2)", marginTop: 8, lineHeight: 1.5 }}>
             SCALE-UP = intra-node/rack GPU-to-GPU fabric (NVLink/NVSwitch); SCALE-OUT = node-to-node network fabric (color = maturity: green production, amber early production, red immature/not offered). Hover either for details. Node = GPUs sharing one scale-up domain (72 for NVL72 rack-scale, 8 for standard HGX, 1 for ungrouped spot instances). ALL-IN = quoted price + storage adder where storage isn't included — the hyperscaler gotcha. ⚠ on a price = below the power+capex sustainability floor (hover for the math): a too-good-to-be-true quote is a counterparty-risk signal, not a bargain, especially with prepay.
           </div>
+        </Section>
+
+        {/* Reserved-term discount curve — read by the Supply Filling Engine */}
+        <Section title="Reserved-term discount curve — % off on-demand as a function of term length" style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.55)", lineHeight: 1.6, marginBottom: 12 }}>
+            The catalog above quotes <b style={{ color: "#e2e8f0" }}>on-demand pay-as-you-go rates</b>. Vendors also offer reserved contracts — locking in capacity for a set term in exchange for a discount off on-demand. Real reserved pricing isn't in the catalog (varies by vendor and negotiation), so we assume a discount curve: bigger discount for committing at all (0 → 1yr is the biggest jump), then diminishing returns for longer commitments. Set three anchors below; the engine interpolates piecewise-linearly for any term. This curve feeds directly into the Supply Filling Engine — when it evaluates a candidate deal at term T, the vendor rate = on-demand × (1 − discount(T)) × operator tier multiplier.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 14 }}>
+            {[
+              { key: "d1", label: "1-YEAR TERM", desc: "biggest jump from OD — first commitment", color: "#fbbf24" },
+              { key: "d3", label: "3-YEAR TERM", desc: "typical enterprise reserved sweet spot", color: "#67e8f9" },
+              { key: "d5", label: "5-YEAR TERM", desc: "long lock — neocloud / dedicated compute", color: "#86efac" },
+            ].map(({ key, label, desc, color }) => (
+              <div key={key} style={{ padding: "10px 12px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                  <span style={{ fontSize: 10, color: color, fontFamily: F, fontWeight: 700, letterSpacing: "0.06em" }}>{label}</span>
+                  <span style={{ fontSize: 16, color: "#e2e8f0", fontWeight: 700, fontFamily: F }}>{disc[key]}%</span>
+                </div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.35)", marginBottom: 8, fontFamily: F }}>{desc}</div>
+                <input type="range" min={0} max={80} step={1} value={disc[key]}
+                  onChange={e => setDisc({ ...disc, [key]: parseInt(e.target.value, 10) })}
+                  style={{ width: "100%", accentColor: color, cursor: "pointer" }}
+                />
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "rgba(255,255,255,0.25)", fontFamily: F, marginTop: 2 }}>
+                  <span>0%</span><span>80%</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Preview: discount schedule + effective rate for H100 */}
+          {(() => {
+            const H100_OD = 2.45;
+            const terms = [0, 6, 12, 18, 24, 36, 48, 60];
+            const rows2 = terms.map(t => ({ t, disc: discountForTerm(t, disc), rate: H100_OD * (1 - discountForTerm(t, disc)) }));
+            const maxDisc = Math.max(...rows2.map(r => r.disc), 0.01);
+            return (
+              <div style={{ padding: "12px 14px", background: "rgba(167,139,250,0.04)", border: "1px solid rgba(167,139,250,0.15)", borderRadius: 6 }}>
+                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", fontFamily: F, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+                  Schedule preview — H100 at ${H100_OD.toFixed(2)}/GPU-hr on-demand
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
+                  <thead><tr>
+                    <th style={{ textAlign: "left", color: "rgba(255,255,255,0.4)", padding: "4px 8px", fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em", fontSize: 9 }}>TERM</th>
+                    <th style={{ textAlign: "right", color: "rgba(255,255,255,0.4)", padding: "4px 8px", fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em", fontSize: 9 }}>DISCOUNT</th>
+                    <th style={{ textAlign: "right", color: "rgba(255,255,255,0.4)", padding: "4px 8px", fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em", fontSize: 9 }}>H100 $/GPU-HR</th>
+                    <th style={{ textAlign: "left", color: "rgba(255,255,255,0.4)", padding: "4px 8px", fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em", fontSize: 9, width: "40%" }}>CURVE</th>
+                  </tr></thead>
+                  <tbody>
+                    {rows2.map(r => {
+                      const isAnchor = r.t === 12 || r.t === 36 || r.t === 60;
+                      const isOD = r.t === 0;
+                      return (
+                        <tr key={r.t} style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+                          <td style={{ padding: "4px 8px", color: isOD ? "#e2e8f0" : "rgba(255,255,255,0.7)", fontWeight: isAnchor || isOD ? 600 : 400 }}>{isOD ? "on-demand" : `${r.t / 12}yr (${r.t}mo)`}</td>
+                          <td style={{ padding: "4px 8px", textAlign: "right", color: isOD ? "rgba(255,255,255,0.3)" : VI, fontWeight: isAnchor ? 700 : 500 }}>{isOD ? "—" : (r.disc * 100).toFixed(1) + "%"}</td>
+                          <td style={{ padding: "4px 8px", textAlign: "right", color: "#67e8f9", fontWeight: isAnchor || isOD ? 700 : 500 }}>${r.rate.toFixed(2)}</td>
+                          <td style={{ padding: "4px 8px" }}>
+                            <div style={{ height: 6, background: "rgba(255,255,255,0.04)", borderRadius: 3, position: "relative" }}>
+                              <div style={{ width: `${r.disc / maxDisc * 100}%`, height: "100%", background: VI, opacity: 0.55, borderRadius: 3 }} />
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.3)", marginTop: 8, lineHeight: 1.5 }}>
+                  Curve is piecewise-linear on years: 0→1yr scales from 0 to the 1yr anchor, 1→3yr interpolates 1yr→3yr, 3→5yr interpolates 3yr→5yr, and beyond 5yr is capped at the 5yr anchor. Vendor tier premium (Platinum +6%, Gold +3%) is applied on top of the term-discounted rate.
+                </div>
+              </div>
+            );
+          })()}
         </Section>
 
         {/* Hedonic pricing model */}
@@ -4162,6 +4556,18 @@ function App() {
           <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 6, lineHeight: 1.6 }}>
             At scale, training throughput ≈ compute × communication efficiency, so dropping from IB (~90%+) to poorly-tuned RoCE (~75%) wastes ~15% of every GPU-hour. MODEL $ columns are the regression's implied fair value vs the lowest tier. The scale-out column reads ~$0 because in this catalog fabric quality moves together with GPU generation and scale-up domain, so the ridge attributes the interconnect premium almost entirely to <b style={{ color: "#e2e8f0" }}>scale-up</b> (NVLink) — the model can't cleanly separate the two, not evidence that fabric is free. Scale-up matters most for inference and tensor parallelism; scale-out for training job size. A lower rate on plain Ethernet isn't cheaper — it's a smaller product.
           </div>
+          <details style={{ marginTop: 10, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 10 }}>
+            <summary style={{ cursor: "pointer", fontSize: 10.5, color: VI, fontFamily: F, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, userSelect: "none", listStyle: "none", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 18, lineHeight: 1 }}>▸</span> Show interconnect topology diagrams (fat tree · rail alignment · radix · GPU:NIC · oversubscription)
+            </summary>
+            <div style={{ marginTop: 10 }}>
+              <iframe
+                src="/interconnect-diagrams.html"
+                title="Interconnect topology reference — what good scale-out fabric looks like"
+                style={{ width: "100%", height: "640px", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, background: "#0b1118", display: "block" }}
+              />
+            </div>
+          </details>
         </Section>
 
         {/* 3 — Operator ranking (ClusterMAX) */}
@@ -4194,9 +4600,18 @@ function App() {
         {/* 4 — Workload → parallelism → fabric */}
         <Section title="Workload → parallelism → fabric — for the researcher conversation" style={{ marginBottom: 12 }}>
           <div style={{ padding: "10px 12px", background: "rgba(167,139,250,0.05)", border: "1px solid rgba(167,139,250,0.18)", borderRadius: 4, marginBottom: 10, fontSize: 10.5, lineHeight: 1.6, color: "rgba(255,255,255,0.75)" }}>
-            <b style={{ color: VI }}>Why this belongs on the vendor conversation, not the internal engineering one.</b> Parallelism itself (DP · TP · PP · MoE · SP) is software — your ML engineers pick it based on model size, sequence length, memory budget, and target latency. The vendor never touches the framework. But every parallelism strategy has a distinct <em>communication pattern</em>, and those patterns dictate the <em>hardware</em> the cluster must provide: intra-node NVLink bandwidth, cross-node fabric BW/latency, oversubscription ratio, rail alignment. The vendor sells you that hardware. Two nominally identical H100 clusters can silently diverge in goodput because one has NVL72 + rail-aligned 400G IB and the other has 8×H100 PCIe boxes on standard Ethernet — the second one <b style={{ color: "#f87171" }}>can't run TP at all</b> and any MoE workload on it will strand from all-to-all congestion. You need enough fluency to translate "we'll run TP=8 + MoE cross-node" into concrete network specs so the vendor can quote them (and so you can push back when they quote you an oversubscribed cluster).
-            <br/><br/>
-            <b style={{ color: "#e2e8f0" }}>The three-step flow:</b> <b style={{ color: "#86efac" }}>(1)</b> talk to researchers → identify parallelism strategies for your workloads &nbsp;→&nbsp; <b style={{ color: "#fbbf24" }}>(2)</b> use this table → derive the fabric specs those strategies demand &nbsp;→&nbsp; <b style={{ color: "#67e8f9" }}>(3)</b> vendor conversation → "quote a cluster that meets these specs, and here's how we'll test it at acceptance."
+            <b style={{ color: VI }}>Why this belongs on the vendor conversation, not the internal engineering one.</b> Parallelism (DP · TP · PP · MoE · SP) is software — ML engineers pick it based on model size, memory, and latency. But each strategy has a distinct communication pattern that dictates the <em>hardware</em> the cluster must provide: intra-node NVLink BW, cross-node fabric BW/latency, oversubscription, rail alignment. Two nominally identical H100 clusters can diverge sharply in goodput — NVL72 + rail-aligned 400G IB vs. 8×H100 PCIe boxes on standard Ethernet — the latter <b style={{ color: "#f87171" }}>can't run TP at all</b> and any MoE workload strands from all-to-all congestion. You need enough fluency to translate "TP=8 + MoE cross-node" into concrete network specs so the vendor can quote them, and so you can push back on an oversubscribed cluster. <b style={{ color: "#e2e8f0" }}>The three-step flow:</b> <b style={{ color: "#86efac" }}>(1)</b> talk to researchers → identify parallelism strategies for your workloads &nbsp;→&nbsp; <b style={{ color: "#fbbf24" }}>(2)</b> use this table → derive the fabric specs those strategies demand &nbsp;→&nbsp; <b style={{ color: "#67e8f9" }}>(3)</b> vendor conversation → "quote a cluster that meets these specs, and here's how we'll test it at acceptance."
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid rgba(167,139,250,0.18)" }}>
+              <b style={{ color: "#67e8f9" }}>Vendor questions this table arms you to ask</b> — pick from these based on which parallelism strategies your workloads use. Every one has a right answer you can score against.
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "rgba(255,255,255,0.65)" }}>
+                <li><b style={{ color: "#e2e8f0" }}>Intra-node:</b> "What's the NVLink domain size (8-GPU HGX, 72-GPU NVL72, or PCIe-only)? Per-GPU NVLink bandwidth in GB/s? Any partitioning that fragments the domain (MIG, vGPU)?" — TP and SP are dead without NVLink.</li>
+                <li><b style={{ color: "#e2e8f0" }}>Cross-node:</b> "InfiniBand generation (NDR / XDR) and per-GPU cross-node bandwidth? Ethernet or IB? Per-GPU rate in Gbps (400 baseline / 800 next-gen)?" — PP over Ethernet is inference-only territory.</li>
+                <li><b style={{ color: "#e2e8f0" }}>Topology:</b> "Fat-tree bisection ratio? Oversubscription at each tier (leaf, spine)? Number of switch hops end-to-end?" — MoE dies if this isn't 1:1 or 2:1.</li>
+                <li><b style={{ color: "#e2e8f0" }}>Rail alignment:</b> "Is the fabric rail-aligned — each GPU's NIC has a dedicated switch plane? Or is it a shared / partially-shared fabric?" — the single question that most vendors don't volunteer and that most determines MoE / all-to-all goodput.</li>
+                <li><b style={{ color: "#e2e8f0" }}>Acceptance test:</b> "Will you commit to running <em>my</em> NCCL all-reduce, all-to-all, and end-to-end MFU benchmark at handover, at target message sizes? What's the minimum result you'll cure to?" — never sign without this.</li>
+                <li><b style={{ color: "#e2e8f0" }}>Fleet homogeneity:</b> "Firmware / NCCL / driver version pinning across the fleet? Are all nodes the same hardware SKU?" — a mixed fleet destroys collective performance because slowest node paces the group.</li>
+              </ul>
+            </div>
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, fontFamily: F }}>
@@ -4223,23 +4638,12 @@ function App() {
               </tbody>
             </table>
           </div>
-          <div style={{ marginTop: 10, padding: "10px 12px", background: "rgba(103,232,249,0.04)", border: "1px solid rgba(103,232,249,0.15)", borderRadius: 4, fontSize: 10.5, lineHeight: 1.65, color: "rgba(255,255,255,0.75)" }}>
-            <b style={{ color: "#67e8f9" }}>Vendor questions this table arms you to ask</b> — pick from these based on which parallelism strategies your workloads use. Every one has a right answer you can score against.
-            <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "rgba(255,255,255,0.65)" }}>
-              <li><b style={{ color: "#e2e8f0" }}>Intra-node:</b> "What's the NVLink domain size (8-GPU HGX, 72-GPU NVL72, or PCIe-only)? Per-GPU NVLink bandwidth in GB/s? Any partitioning that fragments the domain (MIG, vGPU)?" — TP and SP are dead without NVLink.</li>
-              <li><b style={{ color: "#e2e8f0" }}>Cross-node:</b> "InfiniBand generation (NDR / XDR) and per-GPU cross-node bandwidth? Ethernet or IB? Per-GPU rate in Gbps (400 baseline / 800 next-gen)?" — PP over Ethernet is inference-only territory.</li>
-              <li><b style={{ color: "#e2e8f0" }}>Topology:</b> "Fat-tree bisection ratio? Oversubscription at each tier (leaf, spine)? Number of switch hops end-to-end?" — MoE dies if this isn't 1:1 or 2:1.</li>
-              <li><b style={{ color: "#e2e8f0" }}>Rail alignment:</b> "Is the fabric rail-aligned — each GPU's NIC has a dedicated switch plane? Or is it a shared / partially-shared fabric?" — the single question that most vendors don't volunteer and that most determines MoE / all-to-all goodput.</li>
-              <li><b style={{ color: "#e2e8f0" }}>Acceptance test:</b> "Will you commit to running <em>my</em> NCCL all-reduce, all-to-all, and end-to-end MFU benchmark at handover, at target message sizes? What's the minimum result you'll cure to?" — never sign without this.</li>
-              <li><b style={{ color: "#e2e8f0" }}>Fleet homogeneity:</b> "Firmware / NCCL / driver version pinning across the fleet? Are all nodes the same hardware SKU?" — a mixed fleet destroys collective performance because slowest node paces the group.</li>
-            </ul>
-          </div>
           <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 8, lineHeight: 1.6 }}>
             Translate a researcher's ask ("400B dense", "70B decode at 100 QPS with 8K context", "MoE 8-expert top-2", "128K sequence fine-tune") into the parallelism split, its comm pattern, and the fabric requirement that follows. The fabric column is where two nominally identical clusters silently diverge in goodput.
           </div>
           <details style={{ marginTop: 10, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 10 }}>
-            <summary style={{ cursor: "pointer", fontSize: 10.5, color: VI, fontFamily: F, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, userSelect: "none", listStyle: "none" }}>
-              ▸ Show parallelism diagrams (DP · TP · PP · MoE · SP)
+            <summary style={{ cursor: "pointer", fontSize: 10.5, color: VI, fontFamily: F, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, userSelect: "none", listStyle: "none", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 18, lineHeight: 1 }}>▸</span> Show parallelism diagrams (DP · TP · PP · MoE · SP)
             </summary>
             <div style={{ marginTop: 10 }}>
               <iframe
@@ -5059,7 +5463,7 @@ function InstructionsApp() {
       tabs: ["Vendor Spec & Contracts"],
       color: AMB,
       question: "Who do we buy from, and what is a fair price for each GPU spec?",
-      answer: "Cross-check vendor catalogs (GPU type, fabric, config, price), fit a sign-constrained ridge regression for a \"fair\" price benchmark, and score prospective vendors against an 8-part diligence framework that highlights key negotiating points for the contract-signing process.",
+      answer: "Cross-check vendor catalogs (GPU type, fabric, config, price), fit a sign-constrained ridge regression for a \"fair\" price benchmark, and score prospective vendors against an 8-part diligence framework that highlights key negotiating points for the contract-signing process. A reference guide covers GPU hardware specs, scale-up/scale-out topologies (e.g., rail-alignment, fat-trees), parallelism strategies, and data center operator rankings.",
     },
     {
       n: "05",
@@ -5067,7 +5471,7 @@ function InstructionsApp() {
       tabs: ["Supply Chain Bottlenecks"],
       color: RO,
       question: "How long will aggregate compute supply stay constrained — buy now, or wait?",
-      answer: "Zooms out from our book to the full semiconductor stack (wafers → packaging → HBM → GPUs → systems → DC), marking the pacing chokepoints. Structural bottlenecks → lock in now; loosening → wait before signing take-or-pay.",
+      answer: "Zooms out from our book to the full semiconductor stack (wafers → packaging → HBM → GPUs → systems → DC), tracking ~200 companies critical to the supply chain and marking the pacing chokepoints. Structural bottlenecks → lock in now; loosening → wait before signing take-or-pay.",
     },
     {
       n: "06",
@@ -5083,7 +5487,7 @@ function InstructionsApp() {
       tabs: ["Compute Supply", "→ Supply Filling Engine"],
       color: CYAN,
       question: "Which GPUs, how many, from which vendors, at what term — under what risk limits?",
-      answer: "Supply Filling Engine's optimization pass maximizes expected profit subject to portfolio guardrails (vendor concentration, cash-prepay caps, DC-tier limits, total-spend cap on committed contract value). Emits a ranked buy list with quantity, vendor, and timing.",
+      answer: "Supply Filling Engine sizes each bucket's committable capacity via the classical newsvendor model, then selects deals through a three-stage stochastic optimization with real-options structure subject to portfolio guardrails (e.g., vendor concentration, cash-prepay caps, DC-tier limits, total-spend cap). Emits a ranked buy list with quantity, vendor, term, and timing.",
     },
   ];
 
@@ -6965,6 +7369,7 @@ function BottlenecksApp() {
 
 export default function App() {
   const [side, setSide] = useState("instructions");
+  const [hoveredKey, setHoveredKey] = useState(null);
   const tabs = [
     { key: "instructions", label: "INSTRUCTIONS", sub: "how to read this dashboard" },
     { key: "qa", label: "Q&A", sub: "ask the LLM to tweak parameters" },
@@ -6977,20 +7382,36 @@ export default function App() {
   ];
   return (
     <div style={{ minHeight: "100vh", background: "#0b1118" }}>
-      <div style={{ display: "flex", alignItems: "stretch", gap: 0, borderBottom: "1px solid rgba(255,255,255,0.07)", background: "#0b1118", padding: "0 20px", position: "sticky", top: 0, zIndex: 50 }}>
+      <div style={{ display: "flex", alignItems: "stretch", gap: 4, borderBottom: "1px solid rgba(103,232,249,0.15)", background: "#0b1118", padding: "0 20px", position: "sticky", top: 0, zIndex: 50 }}>
         <div style={{ display: "flex", alignItems: "center", paddingRight: 20, borderRight: "1px solid rgba(255,255,255,0.05)", margin: "10px 0" }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", fontFamily: TAB_F, letterSpacing: "-0.02em", whiteSpace: "nowrap" }}>Compute Management Dashboard</span>
         </div>
-        {tabs.map(t => (
-          <button key={t.key} onClick={() => setSide(t.key)} style={{
-            background: "none", border: "none", cursor: "pointer", padding: "12px 18px 10px",
-            borderBottom: side === t.key ? "2px solid #67e8f9" : "2px solid transparent",
-            display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 1,
-          }}>
-            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", fontFamily: TAB_F, color: side === t.key ? "#67e8f9" : "rgba(255,255,255,0.35)" }}>{t.label}</span>
-            <span style={{ fontSize: 9, fontFamily: TAB_F, color: side === t.key ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.18)" }}>{t.sub}</span>
-          </button>
-        ))}
+        {tabs.map(t => {
+          const isActive = side === t.key;
+          const isHovered = hoveredKey === t.key;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setSide(t.key)}
+              onMouseEnter={() => setHoveredKey(t.key)}
+              onMouseLeave={() => setHoveredKey(null)}
+              style={{
+                background: isActive ? "rgba(103,232,249,0.1)" : isHovered ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.02)",
+                border: isActive ? "1px solid rgba(103,232,249,0.4)" : isHovered ? "1px solid rgba(255,255,255,0.18)" : "1px solid rgba(255,255,255,0.08)",
+                borderBottom: isActive ? "2px solid #67e8f9" : "1px solid rgba(255,255,255,0.08)",
+                cursor: "pointer",
+                padding: "10px 16px 9px",
+                margin: "8px 0 0",
+                borderRadius: "6px 6px 0 0",
+                display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2,
+                transition: "background 0.12s, border-color 0.12s, color 0.12s",
+              }}
+            >
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", fontFamily: TAB_F, color: isActive ? "#67e8f9" : isHovered ? "#f1f5f9" : "rgba(226,232,240,0.85)" }}>{t.label}</span>
+              <span style={{ fontSize: 9, fontFamily: TAB_F, color: isActive ? "rgba(255,255,255,0.6)" : isHovered ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.4)" }}>{t.sub}</span>
+            </button>
+          );
+        })}
       </div>
       <div style={{ display: side === "instructions" ? "block" : "none" }}><InstructionsApp /></div>
       <div style={{ display: side === "projections" ? "block" : "none" }}><ProjectionsApp /></div>

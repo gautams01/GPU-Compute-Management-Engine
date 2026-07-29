@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Interconnect topology reference</title>
+<style>
+  :root {
+    --bg: #0b1118;
+    --card: rgba(255,255,255,0.04);
+    --border: rgba(255,255,255,0.12);
+    --text: #e2e8f0;
+    --text-muted: rgba(226,232,240,0.55);
+    --text-dim: rgba(226,232,240,0.35);
+    --teal: #67e8f9;
+    --teal-fill: rgba(103,232,249,0.10);
+    --coral: #fca5a5;
+    --coral-fill: rgba(252,165,165,0.10);
+    --purple: #c4b5fd;
+    --purple-fill: rgba(196,181,253,0.10);
+    --amber: #fbbf24;
+    --amber-fill: rgba(251,191,36,0.10);
+    --green: #86efac;
+    --green-fill: rgba(134,239,172,0.10);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 20px 16px 40px;
+  }
+  h1 {
+    font-size: 17px;
+    font-weight: 700;
+    text-align: center;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  p.subtitle {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    margin: 0 0 22px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    max-width: 780px;
+    margin: 0 auto 14px;
+    padding: 14px 18px 18px;
+  }
+  .card h2 {
+    font-size: 13px;
+    font-weight: 700;
+    margin: 0 0 4px;
+    color: var(--text);
+  }
+  .card p.desc {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    margin: 0 0 12px;
+    line-height: 1.55;
+  }
+  svg { display: block; width: 100%; height: auto; }
+  text { font-family: inherit; }
+  .t14 { font-size: 12.5px; }
+  .t12 { font-size: 11px; }
+  .t10 { font-size: 9.5px; }
+  .th { font-size: 12.5px; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<h1>Interconnect topology reference</h1>
+<p class="subtitle">What "good" scale-out fabric looks like — the five knobs that determine whether the cluster performs at its silicon</p>
+
+<!-- ================================================================ -->
+<div class="card">
+  <h2>Fat tree — non-blocking leaf-spine</h2>
+  <p class="desc">Two-tier Clos: every leaf switch connects to every spine (full mesh), and every host connects to a leaf. Multiple equal-cost paths between any two hosts, so no single link failure partitions the fabric. "Non-blocking" means the total leaf uplink bandwidth to spines equals its total downlink bandwidth to hosts — nothing bottlenecks.</p>
+  <svg viewBox="0 0 720 340">
+    <text class="th" x="360" y="18" text-anchor="middle" fill="var(--teal)">SPINE TIER</text>
+    <rect x="200" y="28" width="140" height="44" rx="8" fill="var(--teal-fill)" stroke="var(--teal)"/>
+    <text class="t12" x="270" y="46" text-anchor="middle" fill="var(--teal)" font-weight="700">Spine 1</text>
+    <text class="t10" x="270" y="62" text-anchor="middle" fill="var(--text-muted)">radix ports</text>
+    <rect x="380" y="28" width="140" height="44" rx="8" fill="var(--teal-fill)" stroke="var(--teal)"/>
+    <text class="t12" x="450" y="46" text-anchor="middle" fill="var(--teal)" font-weight="700">Spine 2</text>
+    <text class="t10" x="450" y="62" text-anchor="middle" fill="var(--text-muted)">radix ports</text>
+
+    <text class="th" x="360" y="120" text-anchor="middle" fill="var(--purple)">LEAF TIER (top-of-rack)</text>
+    <rect x="40" y="132" width="110" height="42" rx="6" fill="var(--purple-fill)" stroke="var(--purple)"/>
+    <text class="t12" x="95" y="158" text-anchor="middle" fill="var(--purple)" font-weight="700">Leaf 1</text>
+    <rect x="200" y="132" width="110" height="42" rx="6" fill="var(--purple-fill)" stroke="var(--purple)"/>
+    <text class="t12" x="255" y="158" text-anchor="middle" fill="var(--purple)" font-weight="700">Leaf 2</text>
+    <rect x="360" y="132" width="110" height="42" rx="6" fill="var(--purple-fill)" stroke="var(--purple)"/>
+    <text class="t12" x="415" y="158" text-anchor="middle" fill="var(--purple)" font-weight="700">Leaf 3</text>
+    <rect x="520" y="132" width="110" height="42" rx="6" fill="var(--purple-fill)" stroke="var(--purple)"/>
+    <text class="t12" x="575" y="158" text-anchor="middle" fill="var(--purple)" font-weight="700">Leaf 4</text>
+
+    <g stroke="var(--teal)" stroke-width="0.9" opacity="0.55">
+      <line x1="95" y1="132" x2="270" y2="72"/><line x1="95" y1="132" x2="450" y2="72"/>
+      <line x1="255" y1="132" x2="270" y2="72"/><line x1="255" y1="132" x2="450" y2="72"/>
+      <line x1="415" y1="132" x2="270" y2="72"/><line x1="415" y1="132" x2="450" y2="72"/>
+      <line x1="575" y1="132" x2="270" y2="72"/><line x1="575" y1="132" x2="450" y2="72"/>
+    </g>
+
+    <text class="th" x="360" y="212" text-anchor="middle" fill="var(--amber)">COMPUTE NODES</text>
+    <g fill="var(--amber-fill)" stroke="var(--amber)">
+      <rect x="30" y="222" width="34" height="30" rx="4"/><rect x="72" y="222" width="34" height="30" rx="4"/><rect x="114" y="222" width="34" height="30" rx="4"/>
+      <rect x="190" y="222" width="34" height="30" rx="4"/><rect x="232" y="222" width="34" height="30" rx="4"/><rect x="274" y="222" width="34" height="30" rx="4"/>
+      <rect x="350" y="222" width="34" height="30" rx="4"/><rect x="392" y="222" width="34" height="30" rx="4"/><rect x="434" y="222" width="34" height="30" rx="4"/>
+      <rect x="510" y="222" width="34" height="30" rx="4"/><rect x="552" y="222" width="34" height="30" rx="4"/><rect x="594" y="222" width="34" height="30" rx="4"/>
+    </g>
+    <g stroke="var(--purple)" stroke-width="0.8" opacity="0.55">
+      <line x1="95" y1="174" x2="47" y2="222"/><line x1="95" y1="174" x2="89" y2="222"/><line x1="95" y1="174" x2="131" y2="222"/>
+      <line x1="255" y1="174" x2="207" y2="222"/><line x1="255" y1="174" x2="249" y2="222"/><line x1="255" y1="174" x2="291" y2="222"/>
+      <line x1="415" y1="174" x2="367" y2="222"/><line x1="415" y1="174" x2="409" y2="222"/><line x1="415" y1="174" x2="451" y2="222"/>
+      <line x1="575" y1="174" x2="527" y2="222"/><line x1="575" y1="174" x2="569" y2="222"/><line x1="575" y1="174" x2="611" y2="222"/>
+    </g>
+
+    <text class="t12" x="360" y="285" text-anchor="middle" fill="var(--text-muted)">Two paths between any two leaves (via Spine 1 or Spine 2) → ECMP load-spreading + fault tolerance</text>
+    <text class="t12" x="360" y="303" text-anchor="middle" fill="var(--text-muted)">Non-blocking: each leaf's uplink bandwidth to spines equals its downlink bandwidth to hosts</text>
+    <text class="t10" x="360" y="325" text-anchor="middle" fill="var(--text-dim)">Real AI clusters use 3-tier fat trees (leaf → aggregation spine → super-spine) once radix²/2 hosts is exceeded</text>
+  </svg>
+</div>
+
+<!-- ================================================================ -->
+<div class="card">
+  <h2>Rail alignment — each GPU's NIC on its own switch plane</h2>
+  <p class="desc">GPU N in every node connects to Rail-N switch and only Rail-N switch. All-to-all traffic on rail K stays on rail K — no cross-rail congestion. Non-rail-aligned fabric funnels all 8 GPUs' traffic through one shared switch, where MoE all-to-all bursts contend at the leaf uplinks. Rail alignment is the single most under-appreciated determinant of AI cluster goodput.</p>
+  <svg viewBox="0 0 720 320">
+    <text class="th" x="360" y="18" text-anchor="middle" fill="var(--teal)">8 RAIL SWITCHES (one per GPU position)</text>
+    <g fill="var(--teal-fill)" stroke="var(--teal)">
+      <rect x="30" y="32" width="72" height="34" rx="4"/><rect x="118" y="32" width="72" height="34" rx="4"/>
+      <rect x="206" y="32" width="72" height="34" rx="4"/><rect x="294" y="32" width="72" height="34" rx="4"/>
+      <rect x="382" y="32" width="72" height="34" rx="4"/><rect x="470" y="32" width="72" height="34" rx="4"/>
+      <rect x="558" y="32" width="72" height="34" rx="4"/><rect x="646" y="32" width="66" height="34" rx="4"/>
+    </g>
+    <g fill="var(--teal)" font-size="10.5" text-anchor="middle" font-weight="700">
+      <text x="66" y="53">Rail 0</text><text x="154" y="53">Rail 1</text><text x="242" y="53">Rail 2</text><text x="330" y="53">Rail 3</text>
+      <text x="418" y="53">Rail 4</text><text x="506" y="53">Rail 5</text><text x="594" y="53">Rail 6</text><text x="679" y="53">Rail 7</text>
+    </g>
+
+    <text class="th" x="180" y="102" text-anchor="middle" fill="var(--amber)">NODE A</text>
+    <rect x="30" y="112" width="300" height="70" rx="8" fill="var(--amber-fill)" stroke="var(--amber)"/>
+    <g fill="rgba(251,191,36,0.20)" stroke="var(--amber)">
+      <rect x="42" y="126" width="30" height="42" rx="3"/><rect x="78" y="126" width="30" height="42" rx="3"/>
+      <rect x="114" y="126" width="30" height="42" rx="3"/><rect x="150" y="126" width="30" height="42" rx="3"/>
+      <rect x="186" y="126" width="30" height="42" rx="3"/><rect x="222" y="126" width="30" height="42" rx="3"/>
+      <rect x="258" y="126" width="30" height="42" rx="3"/><rect x="294" y="126" width="30" height="42" rx="3"/>
+    </g>
+    <g fill="var(--amber)" font-size="9" text-anchor="middle" font-weight="700">
+      <text x="57" y="152">G0</text><text x="93" y="152">G1</text><text x="129" y="152">G2</text><text x="165" y="152">G3</text>
+      <text x="201" y="152">G4</text><text x="237" y="152">G5</text><text x="273" y="152">G6</text><text x="309" y="152">G7</text>
+    </g>
+
+    <text class="th" x="540" y="102" text-anchor="middle" fill="var(--amber)">NODE B</text>
+    <rect x="390" y="112" width="300" height="70" rx="8" fill="var(--amber-fill)" stroke="var(--amber)"/>
+    <g fill="rgba(251,191,36,0.20)" stroke="var(--amber)">
+      <rect x="402" y="126" width="30" height="42" rx="3"/><rect x="438" y="126" width="30" height="42" rx="3"/>
+      <rect x="474" y="126" width="30" height="42" rx="3"/><rect x="510" y="126" width="30" height="42" rx="3"/>
+      <rect x="546" y="126" width="30" height="42" rx="3"/><rect x="582" y="126" width="30" height="42" rx="3"/>
+      <rect x="618" y="126" width="30" height="42" rx="3"/><rect x="654" y="126" width="30" height="42" rx="3"/>
+    </g>
+    <g fill="var(--amber)" font-size="9" text-anchor="middle" font-weight="700">
+      <text x="417" y="152">G0</text><text x="453" y="152">G1</text><text x="489" y="152">G2</text><text x="525" y="152">G3</text>
+      <text x="561" y="152">G4</text><text x="597" y="152">G5</text><text x="633" y="152">G6</text><text x="669" y="152">G7</text>
+    </g>
+
+    <g stroke="var(--teal)" stroke-width="1.1" opacity="0.85">
+      <line x1="57" y1="126" x2="66" y2="66"/><line x1="93" y1="126" x2="154" y2="66"/>
+      <line x1="129" y1="126" x2="242" y2="66"/><line x1="165" y1="126" x2="330" y2="66"/>
+      <line x1="201" y1="126" x2="418" y2="66"/><line x1="237" y1="126" x2="506" y2="66"/>
+      <line x1="273" y1="126" x2="594" y2="66"/><line x1="309" y1="126" x2="679" y2="66"/>
+      <line x1="417" y1="126" x2="66" y2="66"/><line x1="453" y1="126" x2="154" y2="66"/>
+      <line x1="489" y1="126" x2="242" y2="66"/><line x1="525" y1="126" x2="330" y2="66"/>
+      <line x1="561" y1="126" x2="418" y2="66"/><line x1="597" y1="126" x2="506" y2="66"/>
+      <line x1="633" y1="126" x2="594" y2="66"/><line x1="669" y1="126" x2="679" y2="66"/>
+    </g>
+
+    <text class="t12" x="360" y="220" text-anchor="middle" fill="var(--text-muted)">Node A's GPU-4 talks to Node B's GPU-4 via Rail 4 — never crosses another rail's switch</text>
+    <text class="t12" x="360" y="240" text-anchor="middle" fill="var(--text-muted)">MoE all-to-all: 8 concurrent flows on 8 dedicated rails → no cross-flow congestion, deterministic latency</text>
+    <text class="t10" x="360" y="264" text-anchor="middle" fill="var(--coral)">Not rail-aligned = all 16 GPUs' traffic funnels through shared leaves → MoE dies from bisection contention</text>
+    <text class="t10" x="360" y="282" text-anchor="middle" fill="var(--text-dim)">Ask: "Is the scale-out fabric rail-aligned?" — the question most vendors don't volunteer</text>
+  </svg>
+</div>
+
+<!-- ================================================================ -->
+<div class="card">
+  <h2>Switch radix — port count sets the max cluster size per tier</h2>
+  <p class="desc">Radix = number of ports on a single switch. In a non-blocking 2-tier fat tree, half the radix goes down to hosts and half goes up to spines, so max non-blocking hosts ≈ (radix / 2)² × spines. Higher radix means fewer switch tiers, fewer hops, lower latency, and less cabling. Modern IB / Ethernet switches ship 64–128 ports at 400G+ specifically to enable single-tier or two-tier fabrics at AI scale.</p>
+  <svg viewBox="0 0 720 260">
+    <rect x="30" y="20" width="320" height="220" rx="10" fill="var(--coral-fill)" stroke="var(--coral)"/>
+    <text class="th" x="190" y="42" text-anchor="middle" fill="var(--coral)">Radix 32 (older switch)</text>
+
+    <rect x="130" y="60" width="120" height="46" rx="6" fill="rgba(252,165,165,0.20)" stroke="var(--coral)"/>
+    <text class="t12" x="190" y="80" text-anchor="middle" fill="var(--coral)" font-weight="700">32-port switch</text>
+    <text class="t10" x="190" y="96" text-anchor="middle" fill="var(--text-muted)">16 down · 16 up</text>
+
+    <g stroke="var(--coral)" stroke-width="0.7" opacity="0.55">
+      <line x1="140" y1="106" x2="90" y2="140"/><line x1="160" y1="106" x2="130" y2="140"/><line x1="180" y1="106" x2="170" y2="140"/>
+      <line x1="200" y1="106" x2="210" y2="140"/><line x1="220" y1="106" x2="250" y2="140"/><line x1="240" y1="106" x2="290" y2="140"/>
+    </g>
+    <text class="t10" x="190" y="158" text-anchor="middle" fill="var(--text-muted)">16 hosts per switch</text>
+
+    <text class="t12" x="190" y="188" text-anchor="middle" fill="var(--coral)" font-weight="700">2-tier max ≈ (16)² = 256 hosts</text>
+    <text class="t10" x="190" y="208" text-anchor="middle" fill="var(--text-muted)">Larger clusters need 3 tiers</text>
+    <text class="t10" x="190" y="224" text-anchor="middle" fill="var(--text-muted)">→ extra hop → higher latency</text>
+
+    <rect x="370" y="20" width="320" height="220" rx="10" fill="var(--green-fill)" stroke="var(--green)"/>
+    <text class="th" x="530" y="42" text-anchor="middle" fill="var(--green)">Radix 64 (modern NDR/XDR)</text>
+
+    <rect x="450" y="60" width="160" height="46" rx="6" fill="rgba(134,239,172,0.18)" stroke="var(--green)"/>
+    <text class="t12" x="530" y="80" text-anchor="middle" fill="var(--green)" font-weight="700">64-port switch</text>
+    <text class="t10" x="530" y="96" text-anchor="middle" fill="var(--text-muted)">32 down · 32 up</text>
+
+    <g stroke="var(--green)" stroke-width="0.7" opacity="0.55">
+      <line x1="458" y1="106" x2="420" y2="140"/><line x1="475" y1="106" x2="450" y2="140"/><line x1="492" y1="106" x2="480" y2="140"/>
+      <line x1="509" y1="106" x2="510" y2="140"/><line x1="526" y1="106" x2="540" y2="140"/><line x1="543" y1="106" x2="570" y2="140"/>
+      <line x1="560" y1="106" x2="600" y2="140"/><line x1="577" y1="106" x2="620" y2="140"/><line x1="594" y1="106" x2="640" y2="140"/>
+    </g>
+    <text class="t10" x="530" y="158" text-anchor="middle" fill="var(--text-muted)">32 hosts per switch</text>
+
+    <text class="t12" x="530" y="188" text-anchor="middle" fill="var(--green)" font-weight="700">2-tier max ≈ (32)² = 1,024 hosts</text>
+    <text class="t10" x="530" y="208" text-anchor="middle" fill="var(--text-muted)">10k-GPU trainings fit in 2 tiers</text>
+    <text class="t10" x="530" y="224" text-anchor="middle" fill="var(--text-muted)">→ one fewer hop, lower latency</text>
+  </svg>
+</div>
+
+<!-- ================================================================ -->
+<div class="card">
+  <h2>GPU-to-NIC ratio — dedicated NIC per GPU is the AI norm</h2>
+  <p class="desc">The scale-out NIC connects a GPU to the fabric. AI training and MoE inference need each GPU to move data at line rate independently of its neighbors, so the norm is <b>1 NIC per GPU</b> (typically 400G NDR or 800G XDR). Shared NICs halve or quarter the effective per-GPU cross-node bandwidth — fine for enterprise VM clusters where GPUs run isolated jobs, ruinous for tensor-parallel or MoE workloads.</p>
+  <svg viewBox="0 0 720 280">
+    <rect x="20" y="20" width="220" height="240" rx="10" fill="var(--green-fill)" stroke="var(--green)"/>
+    <text class="th" x="130" y="42" text-anchor="middle" fill="var(--green)">1:1 (IDEAL)</text>
+    <g fill="rgba(134,239,172,0.20)" stroke="var(--green)">
+      <rect x="40" y="60" width="36" height="42" rx="4"/><rect x="90" y="60" width="36" height="42" rx="4"/>
+      <rect x="140" y="60" width="36" height="42" rx="4"/><rect x="190" y="60" width="36" height="42" rx="4"/>
+    </g>
+    <g fill="var(--green)" font-size="10" font-weight="700" text-anchor="middle">
+      <text x="58" y="86">G0</text><text x="108" y="86">G1</text><text x="158" y="86">G2</text><text x="208" y="86">G3</text>
+    </g>
+    <g fill="rgba(103,232,249,0.15)" stroke="var(--teal)">
+      <rect x="40" y="132" width="36" height="26" rx="3"/><rect x="90" y="132" width="36" height="26" rx="3"/>
+      <rect x="140" y="132" width="36" height="26" rx="3"/><rect x="190" y="132" width="36" height="26" rx="3"/>
+    </g>
+    <g fill="var(--teal)" font-size="9" font-weight="700" text-anchor="middle">
+      <text x="58" y="149">NIC</text><text x="108" y="149">NIC</text><text x="158" y="149">NIC</text><text x="208" y="149">NIC</text>
+    </g>
+    <g stroke="var(--teal)" stroke-width="1.1">
+      <line x1="58" y1="102" x2="58" y2="132"/><line x1="108" y1="102" x2="108" y2="132"/>
+      <line x1="158" y1="102" x2="158" y2="132"/><line x1="208" y1="102" x2="208" y2="132"/>
+    </g>
+    <text class="t12" x="130" y="192" text-anchor="middle" fill="var(--green)" font-weight="700">400 Gb/s per GPU</text>
+    <text class="t10" x="130" y="212" text-anchor="middle" fill="var(--text-muted)">Full line rate, all GPUs</text>
+    <text class="t10" x="130" y="232" text-anchor="middle" fill="var(--text-muted)">MoE / TP: no contention</text>
+    <text class="t10" x="130" y="248" text-anchor="middle" fill="var(--green)">↑ frontier training, MoE inference</text>
+
+    <rect x="260" y="20" width="200" height="240" rx="10" fill="var(--amber-fill)" stroke="var(--amber)"/>
+    <text class="th" x="360" y="42" text-anchor="middle" fill="var(--amber)">1:2 (SHARED)</text>
+    <g fill="rgba(251,191,36,0.20)" stroke="var(--amber)">
+      <rect x="278" y="60" width="36" height="42" rx="4"/><rect x="322" y="60" width="36" height="42" rx="4"/>
+      <rect x="374" y="60" width="36" height="42" rx="4"/><rect x="418" y="60" width="36" height="42" rx="4"/>
+    </g>
+    <g fill="var(--amber)" font-size="10" font-weight="700" text-anchor="middle">
+      <text x="296" y="86">G0</text><text x="340" y="86">G1</text><text x="392" y="86">G2</text><text x="436" y="86">G3</text>
+    </g>
+    <g fill="rgba(103,232,249,0.15)" stroke="var(--teal)">
+      <rect x="300" y="132" width="36" height="26" rx="3"/><rect x="396" y="132" width="36" height="26" rx="3"/>
+    </g>
+    <g fill="var(--teal)" font-size="9" font-weight="700" text-anchor="middle">
+      <text x="318" y="149">NIC</text><text x="414" y="149">NIC</text>
+    </g>
+    <g stroke="var(--amber)" stroke-width="1.1">
+      <line x1="296" y1="102" x2="318" y2="132"/><line x1="340" y1="102" x2="318" y2="132"/>
+      <line x1="392" y1="102" x2="414" y2="132"/><line x1="436" y1="102" x2="414" y2="132"/>
+    </g>
+    <text class="t12" x="360" y="192" text-anchor="middle" fill="var(--amber)" font-weight="700">200 Gb/s per GPU</text>
+    <text class="t10" x="360" y="212" text-anchor="middle" fill="var(--text-muted)">Peers contend for NIC</text>
+    <text class="t10" x="360" y="232" text-anchor="middle" fill="var(--text-muted)">Fine for isolated VM jobs</text>
+    <text class="t10" x="360" y="248" text-anchor="middle" fill="var(--amber)">↑ enterprise inference / batch</text>
+
+    <rect x="480" y="20" width="220" height="240" rx="10" fill="var(--coral-fill)" stroke="var(--coral)"/>
+    <text class="th" x="590" y="42" text-anchor="middle" fill="var(--coral)">1:4 (BAD)</text>
+    <g fill="rgba(252,165,165,0.20)" stroke="var(--coral)">
+      <rect x="498" y="60" width="36" height="42" rx="4"/><rect x="546" y="60" width="36" height="42" rx="4"/>
+      <rect x="594" y="60" width="36" height="42" rx="4"/><rect x="642" y="60" width="36" height="42" rx="4"/>
+    </g>
+    <g fill="var(--coral)" font-size="10" font-weight="700" text-anchor="middle">
+      <text x="516" y="86">G0</text><text x="564" y="86">G1</text><text x="612" y="86">G2</text><text x="660" y="86">G3</text>
+    </g>
+    <g fill="rgba(103,232,249,0.15)" stroke="var(--teal)">
+      <rect x="570" y="132" width="36" height="26" rx="3"/>
+    </g>
+    <text class="t12" x="588" y="149" text-anchor="middle" fill="var(--teal)" font-weight="700">NIC</text>
+    <g stroke="var(--coral)" stroke-width="1.1">
+      <line x1="516" y1="102" x2="588" y2="132"/><line x1="564" y1="102" x2="588" y2="132"/>
+      <line x1="612" y1="102" x2="588" y2="132"/><line x1="660" y1="102" x2="588" y2="132"/>
+    </g>
+    <text class="t12" x="590" y="192" text-anchor="middle" fill="var(--coral)" font-weight="700">100 Gb/s per GPU</text>
+    <text class="t10" x="590" y="212" text-anchor="middle" fill="var(--text-muted)">Cross-node comms starves</text>
+    <text class="t10" x="590" y="232" text-anchor="middle" fill="var(--text-muted)">Can't train at scale</text>
+    <text class="t10" x="590" y="248" text-anchor="middle" fill="var(--coral)">↑ single-node serving only</text>
+  </svg>
+</div>
+
+<!-- ================================================================ -->
+<div class="card">
+  <h2>Oversubscription ratio — leaf uplink vs downlink bandwidth</h2>
+  <p class="desc">At each switch tier, the ratio of downlink bandwidth (to hosts) to uplink bandwidth (to the next tier) determines how much cross-tier traffic the fabric can carry. 1:1 = non-blocking (every host can talk to every other host at full line rate simultaneously). 2:1 or worse = the uplinks bottleneck when many flows go cross-tier — fine for enterprise workloads with locality, ruinous for training where every step has all-reduce that must traverse the full bisection.</p>
+  <svg viewBox="0 0 720 280">
+    <rect x="20" y="20" width="220" height="240" rx="10" fill="var(--green-fill)" stroke="var(--green)"/>
+    <text class="th" x="130" y="42" text-anchor="middle" fill="var(--green)">1:1 (NON-BLOCKING)</text>
+
+    <rect x="70" y="70" width="120" height="34" rx="4" fill="rgba(134,239,172,0.20)" stroke="var(--green)"/>
+    <text class="t12" x="130" y="92" text-anchor="middle" fill="var(--green)" font-weight="700">Leaf switch</text>
+
+    <g stroke="var(--green)" stroke-width="1.6">
+      <line x1="90" y1="70" x2="70" y2="40"/><line x1="110" y1="70" x2="105" y2="40"/>
+      <line x1="150" y1="70" x2="155" y2="40"/><line x1="170" y1="70" x2="190" y2="40"/>
+    </g>
+    <text class="t10" x="130" y="30" text-anchor="middle" fill="var(--green)" font-weight="700">4× 400G uplinks</text>
+
+    <g stroke="var(--purple)" stroke-width="1.6">
+      <line x1="80" y1="104" x2="60" y2="140"/><line x1="100" y1="104" x2="95" y2="140"/>
+      <line x1="130" y1="104" x2="130" y2="140"/><line x1="160" y1="104" x2="165" y2="140"/>
+      <line x1="180" y1="104" x2="200" y2="140"/>
+    </g>
+    <text class="t10" x="130" y="160" text-anchor="middle" fill="var(--purple)" font-weight="700">4× 400G downlinks</text>
+
+    <text class="t12" x="130" y="196" text-anchor="middle" fill="var(--green)" font-weight="700">1.6 Tb/s ↑ = 1.6 Tb/s ↓</text>
+    <text class="t10" x="130" y="216" text-anchor="middle" fill="var(--text-muted)">All-reduce at full BW</text>
+    <text class="t10" x="130" y="234" text-anchor="middle" fill="var(--text-muted)">No fabric contention</text>
+    <text class="t10" x="130" y="250" text-anchor="middle" fill="var(--green)">↑ training default</text>
+
+    <rect x="260" y="20" width="200" height="240" rx="10" fill="var(--amber-fill)" stroke="var(--amber)"/>
+    <text class="th" x="360" y="42" text-anchor="middle" fill="var(--amber)">2:1 (MILD)</text>
+
+    <rect x="300" y="70" width="120" height="34" rx="4" fill="rgba(251,191,36,0.20)" stroke="var(--amber)"/>
+    <text class="t12" x="360" y="92" text-anchor="middle" fill="var(--amber)" font-weight="700">Leaf switch</text>
+
+    <g stroke="var(--amber)" stroke-width="1.6">
+      <line x1="330" y1="70" x2="325" y2="40"/><line x1="390" y1="70" x2="395" y2="40"/>
+    </g>
+    <text class="t10" x="360" y="30" text-anchor="middle" fill="var(--amber)" font-weight="700">2× 400G uplinks</text>
+
+    <g stroke="var(--purple)" stroke-width="1.6">
+      <line x1="310" y1="104" x2="295" y2="140"/><line x1="330" y1="104" x2="325" y2="140"/>
+      <line x1="360" y1="104" x2="360" y2="140"/><line x1="390" y1="104" x2="395" y2="140"/>
+      <line x1="410" y1="104" x2="425" y2="140"/>
+    </g>
+    <text class="t10" x="360" y="160" text-anchor="middle" fill="var(--purple)" font-weight="700">4× 400G downlinks</text>
+
+    <text class="t12" x="360" y="196" text-anchor="middle" fill="var(--amber)" font-weight="700">0.8 Tb/s ↑ vs 1.6 Tb/s ↓</text>
+    <text class="t10" x="360" y="216" text-anchor="middle" fill="var(--text-muted)">All-reduce halves at bisection</text>
+    <text class="t10" x="360" y="234" text-anchor="middle" fill="var(--text-muted)">OK for locality-heavy jobs</text>
+    <text class="t10" x="360" y="250" text-anchor="middle" fill="var(--amber)">↑ typical enterprise</text>
+
+    <rect x="480" y="20" width="220" height="240" rx="10" fill="var(--coral-fill)" stroke="var(--coral)"/>
+    <text class="th" x="590" y="42" text-anchor="middle" fill="var(--coral)">4:1 (HEAVY)</text>
+
+    <rect x="530" y="70" width="120" height="34" rx="4" fill="rgba(252,165,165,0.20)" stroke="var(--coral)"/>
+    <text class="t12" x="590" y="92" text-anchor="middle" fill="var(--coral)" font-weight="700">Leaf switch</text>
+
+    <g stroke="var(--coral)" stroke-width="1.6">
+      <line x1="590" y1="70" x2="590" y2="40"/>
+    </g>
+    <text class="t10" x="590" y="30" text-anchor="middle" fill="var(--coral)" font-weight="700">1× 400G uplink</text>
+
+    <g stroke="var(--purple)" stroke-width="1.6">
+      <line x1="540" y1="104" x2="525" y2="140"/><line x1="560" y1="104" x2="555" y2="140"/>
+      <line x1="590" y1="104" x2="590" y2="140"/><line x1="620" y1="104" x2="625" y2="140"/>
+      <line x1="640" y1="104" x2="655" y2="140"/>
+    </g>
+    <text class="t10" x="590" y="160" text-anchor="middle" fill="var(--purple)" font-weight="700">4× 400G downlinks</text>
+
+    <text class="t12" x="590" y="196" text-anchor="middle" fill="var(--coral)" font-weight="700">0.4 Tb/s ↑ vs 1.6 Tb/s ↓</text>
+    <text class="t10" x="590" y="216" text-anchor="middle" fill="var(--text-muted)">Cross-leaf all-reduce chokes</text>
+    <text class="t10" x="590" y="234" text-anchor="middle" fill="var(--text-muted)">MoE all-to-all dies</text>
+    <text class="t10" x="590" y="250" text-anchor="middle" fill="var(--coral)">↑ AI-hostile — avoid</text>
+  </svg>
+</div>
+
+</body>
+</html>
